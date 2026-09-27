@@ -46,6 +46,11 @@ def main() -> None:
     run.add_argument("--model", required=True)
     run.add_argument("--api-key-env", default="DASHSCOPE_API_KEY")
     run.add_argument("--base-url", default=None)
+    run.add_argument(
+        "--llm-log",
+        default=None,
+        help="optional JSONL file containing prompts, typed responses and timings",
+    )
     run.add_argument("--remaining-seconds", type=int, required=True)
     run.add_argument("--max-iterations", type=int, default=1)
     run.add_argument("--parent-variant-id", default=None)
@@ -143,7 +148,10 @@ def main() -> None:
         return
 
     llm = OpenAICompatibleLLM(
-        model=args.model, api_key_env=args.api_key_env, base_url=args.base_url
+        model=args.model,
+        api_key_env=args.api_key_env,
+        base_url=args.base_url,
+        log_path=getattr(args, "llm_log", None),
     )
     trail = MethodTrail(
         args.project_root,

@@ -35,13 +35,13 @@ class PortfolioManager:
         self.profiles[profile.variant_id] = profile
         self._save()
 
-    def pareto(self, limit: int = 12) -> list[VariantProfile]:
+    def pareto(self, limit: int = 12, maximize_metric: bool = True) -> list[VariantProfile]:
         profiles = list(self.profiles.values())
         kept = [
             profile
             for profile in profiles
             if not any(
-                self._dominates(other, profile)
+                self._dominates(other, profile, maximize_metric)
                 for other in profiles
                 if other.variant_id != profile.variant_id
             )
@@ -49,7 +49,7 @@ class PortfolioManager:
         # Keep diverse signatures when several points have equivalent tradeoffs.
         kept.sort(
             key=lambda item: (
-                item.metric,
+                item.metric if maximize_metric else -item.metric,
                 item.reliability,
                 item.information_gain,
                 -item.wall_seconds,
@@ -67,16 +67,28 @@ class PortfolioManager:
         return diverse
 
     @staticmethod
-    def _dominates(left: VariantProfile, right: VariantProfile) -> bool:
-        no_worse = (
+    def _dominates(
+        left: VariantProfile, right: VariantProfile, maximize_metric: bool = True
+    ) -> bool:
+        metric_no_worse = (
             left.metric >= right.metric
+            if maximize_metric
+            else left.metric <= right.metric
+        )
+        metric_strictly_better = (
+            left.metric > right.metric
+            if maximize_metric
+            else left.metric < right.metric
+        )
+        no_worse = (
+            metric_no_worse
             and left.reliability >= right.reliability
             and left.information_gain >= right.information_gain
             and left.wall_seconds <= right.wall_seconds
             and left.failure_risk <= right.failure_risk
         )
         strictly_better = (
-            left.metric > right.metric
+            metric_strictly_better
             or left.reliability > right.reliability
             or left.information_gain > right.information_gain
             or left.wall_seconds < right.wall_seconds

@@ -60,6 +60,33 @@ def test_path_priority_prefers_information_with_same_cost(tmp_path: Path) -> Non
     assert ranked[0][0].variant_id == "b"
 
 
+def test_search_policy_changes_value_weights() -> None:
+    breadth = ValueWeights.for_search_policy("breadth", 1, 3)
+    balanced_late = ValueWeights.for_search_policy("balanced", 5, 3)
+    depth = ValueWeights.for_search_policy("depth", 1, 3)
+    assert breadth.beta > breadth.alpha
+    assert balanced_late.alpha > balanced_late.beta
+    assert depth.alpha > depth.beta
+
+
+def test_portfolio_respects_minimization_metric(tmp_path: Path) -> None:
+    from methodtrail.portfolio import PortfolioManager, VariantProfile
+
+    portfolio = PortfolioManager(tmp_path / "portfolio.json")
+    low = VariantProfile(
+        variant_id="low",
+        metric=0.2,
+        wall_seconds=10,
+        reliability=1.0,
+        information_gain=0.5,
+        failure_risk=0.1,
+        signature="low",
+    )
+    high = low.model_copy(update={"variant_id": "high", "metric": 0.8})
+    portfolio.profiles = {"low": low, "high": high}
+    assert [item.variant_id for item in portfolio.pareto(maximize_metric=False)] == ["low"]
+
+
 def test_path_graph_keeps_directed_history_and_matched_branches(tmp_path: Path) -> None:
     graph = ExperimentPathGraph(tmp_path / "graph.json")
     graph.add_node(

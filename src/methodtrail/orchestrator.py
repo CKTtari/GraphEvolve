@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -102,9 +103,14 @@ class MethodTrail:
     ) -> IterationResult:
         self._ensure_project_session(contract)
         assert self.project is not None and self.session is not None
-        if parent_variant_id is None:
-            parent_variant_id = self.project.incumbent_variant_id
-        state = self._state(contract, remaining_seconds, parent_variant_id)
+        code_parent_variant_id = parent_variant_id
+        if code_parent_variant_id is None:
+            code_parent_variant_id = self.project.incumbent_variant_id
+        graph_parent_variant_id = (
+            code_parent_variant_id
+            or self.graph.best_outcome_id(contract.maximize_metric)
+        )
+        state = self._state(contract, remaining_seconds, graph_parent_variant_id)
         state_id = self.store.put("research_state", state)
         self.projects.append_event(
             self.project,
@@ -116,7 +122,7 @@ class MethodTrail:
         hypothesis_id = self.store.put("hypothesis", hypothesis, [state_id])
         proposals = self.choose.propose(contract, state, hypothesis)
         attached = self.graph.attach_proposals(
-            parent_variant_id, proposals.candidates, state.iteration
+            graph_parent_variant_id, proposals.candidates, state.iteration
         )
         proposal_node_ids = [proposal_node_id for proposal_node_id, _ in attached]
         proposals = proposals.model_copy(
@@ -137,10 +143,13 @@ class MethodTrail:
             )
             for index, change in enumerate(proposals.candidates)
         ]
+        weights = ValueWeights.for_search_policy(
+            contract.search_policy, state.iteration, contract.exploration_rounds
+        )
         ranked = self.graph.rank(
             candidates,
             remaining_seconds,
-            ValueWeights(),
+            weights,
             maximize_metric=contract.maximize_metric,
         )
         candidate_indices = {candidate.variant_id: index for index, candidate in enumerate(candidates)}
@@ -155,7 +164,9 @@ class MethodTrail:
             for candidate, priority in ranked
         ]
         priority_id = self.store.put(
-            "candidate_priorities", ranked_payload, [proposal_id]
+            "candidate_priorities",
+            {"weights": weights.model_dump(mode="json"), "ranked": ranked_payload},
+            [proposal_id],
         )
         selection = self.choose.select(contract, state, hypothesis, ranked_payload)
         if selection.selected_index >= len(proposals.candidates):
@@ -163,7 +174,7 @@ class MethodTrail:
                 f"Choose selected invalid candidate index {selection.selected_index}"
             )
         change = proposals.candidates[selection.selected_index].model_copy(
-            update={"parent_variant_id": parent_variant_id}
+            update={"parent_variant_id": graph_parent_variant_id}
         )
         proposal_node_id = proposal_node_ids[selection.selected_index]
         self.graph.mark_proposal_selected(proposal_node_id)
@@ -178,13 +189,23 @@ class MethodTrail:
             self.project,
             self.session,
             contract,
-            parent_variant_id,
+            code_parent_variant_id,
         )
         workspace = Path(candidate.workspace)
         repo_context = RepoMap(workspace).retrieve(
             f"{change.research_question} {change.title}"
         )
         plan = self.coding.write_plan(contract, change, repo_context)
+        # A configuration experiment may still need to edit a source entrypoint
+        # when the task has no separate config file. Preserve the research label,
+        # but let the workspace safety checks see the actual implementation scope.
+        if (
+            change.mutation_class == MutationClass.CONFIGURATION
+            and any(edit.path.endswith(".py") for edit in plan.edits)
+        ):
+            change = change.model_copy(
+                update={"mutation_class": MutationClass.IMPLEMENTATION}
+            )
         plan_id = self.store.put("code_plan", plan, [change_id, priority_id])
         candidate.source_files = sorted({edit.path for edit in plan.edits})
         self.projects.record_candidate(self.project, candidate, status="prepared")
@@ -379,6 +400,7 @@ class MethodTrail:
         for _ in range(max_iterations):
             if remaining_seconds <= 0:
                 break
+            iteration_started = time.monotonic()
             result = self.run_iteration(
                 contract,
                 remaining_seconds=remaining_seconds,
@@ -386,7 +408,9 @@ class MethodTrail:
                 trigger=trigger,
             )
             results.append(result)
-            elapsed = max(1, int(result.run.wall_seconds)) if result.run else 1
+            # The budget covers the complete research turn, including LLM
+            # planning, code editing and execution—not only the Python process.
+            elapsed = max(1, int(time.monotonic() - iteration_started))
             remaining_seconds -= elapsed
             if (
                 result.assessment
@@ -842,7 +866,10 @@ class MethodTrail:
             graph_context=self.graph.context_for(parent_variant_id, query),
             path_hints=self.graph.expansion_hints(parent_variant_id),
             portfolio_context=[
-                profile.model_dump(mode="json") for profile in self.portfolio.pareto()
+                profile.model_dump(mode="json")
+                for profile in self.portfolio.pareto(
+                    maximize_metric=contract.maximize_metric
+                )
             ],
             memory_context=self.experiment_memory.search(contract.task_id, query),
         )

@@ -236,6 +236,24 @@ class ExperimentPathGraph:
         values = list(self.graph.nodes(data=True))[-limit:]
         return [dict(data) for _, data in values]
 
+    def best_outcome_id(self, maximize_metric: bool = True) -> str | None:
+        """Return the best measured outcome as a memory anchor.
+
+        The code parent and the graph-memory anchor are intentionally separate:
+        an unadopted result may still be the most useful place to continue
+        evidence search, while its code must not silently become the incumbent.
+        """
+
+        measured = [
+            (node_id, data)
+            for node_id, data in self.graph.nodes(data=True)
+            if data.get("node_type") == "outcome" and data.get("metric") is not None
+        ]
+        if not measured:
+            return None
+        key = lambda item: float(item[1]["metric"])
+        return (max if maximize_metric else min)(measured, key=key)[0]
+
     @staticmethod
     def priority(
         candidate: CandidatePath, remaining_seconds: int, weights: ValueWeights

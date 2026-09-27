@@ -33,6 +33,20 @@ The graph is stored as readable JSON and the concise experiment memory as JSONL.
 
 Candidate estimates begin with the LLM's expected gain, information value, runtime, and failure risk. Once related paths have measured outcomes, GraphEvolve blends those observations back into the estimates before ranking the next branch. Evaluators may also declare auxiliary metrics and minimum metric constraints; a candidate that misses a declared constraint cannot be adopted on the primary score alone.
 
+### Search policy
+
+The task contract controls how the limited experiment turns are spent:
+
+- `breadth` gives information gain the highest weight and keeps several distinct
+  method families in the candidate pool;
+- `depth` favors extending and tuning a direction that already has support;
+- `balanced` explores for `exploration_rounds`, then shifts toward direct gain and
+  lower-risk refinement.
+
+The policy changes candidate priorities and the proposal prompt. It does not
+silently run candidates in parallel: one selected experiment still runs at a
+time, and every candidate remains in the graph for later comparison.
+
 ## Editing and safety
 
 MethodTrail uses structured edits instead of giving the LLM unrestricted shell access.
@@ -65,7 +79,7 @@ MethodTrail uses the OpenAI Python SDK with an OpenAI-compatible Chat Completion
 
 Pass the variable name, model, and endpoint when starting a run:
 
-    conda run -n methodtrail python -m methodtrail run --contract .\task_contract.json --project-root .\methodtrail_state --project-id demo-project --model your-model-name --api-key-env LLM_API_KEY --base-url https://your-openai-compatible-endpoint/v1 --remaining-seconds 3600 --max-iterations 5
+    conda run -n methodtrail python -m methodtrail run --contract .\task_contract.json --project-root .\methodtrail_state --project-id demo-project --model your-model-name --api-key-env LLM_API_KEY --base-url https://your-openai-compatible-endpoint/v1 --remaining-seconds 3600 --max-iterations 12
 
 The default key variable is DASHSCOPE_API_KEY. Omit the endpoint argument when the default provider endpoint is appropriate.
 
@@ -88,8 +102,11 @@ A task starts with a JSON contract. It declares public input files, editable sou
       "metric_name": "accuracy",
       "maximize_metric": true,
       "timeout_seconds": 900,
-      "max_repair_attempts": 2,
+      "max_repair_attempts": 4,
       "minimum_iterations": 3,
+      "search_policy": "balanced",
+      "exploration_rounds": 3,
+      "proposal_count": 5,
       "allowed_dependencies": ["numpy", "pandas", "scikit-learn"],
       "protected_paths": ["task_contract.json", "metrics.json"]
     }
@@ -105,13 +122,13 @@ For a public task, use evaluation_command instead of the private-evaluator field
 Use a project ID to isolate code history, memory, candidates, and the accepted-version pointer. Use a session ID to pause and later continue one research thread.
 
     # Start a project
-    conda run -n methodtrail python -m methodtrail run --contract .\task_contract.json --project-root .\methodtrail_state --project-id feature-study --model your-model-name --api-key-env LLM_API_KEY --base-url https://your-openai-compatible-endpoint/v1 --remaining-seconds 3600 --max-iterations 5
+    conda run -n methodtrail python -m methodtrail run --contract .\task_contract.json --project-root .\methodtrail_state --project-id feature-study --model your-model-name --api-key-env LLM_API_KEY --base-url https://your-openai-compatible-endpoint/v1 --remaining-seconds 3600 --max-iterations 12
 
     # Pause a session
     conda run -n methodtrail python -m methodtrail pause --project-root .\methodtrail_state --project-id feature-study --session-id <session-id>
 
     # Resume it
-    conda run -n methodtrail python -m methodtrail run --contract .\task_contract.json --project-root .\methodtrail_state --project-id feature-study --session-id <session-id> --model your-model-name --api-key-env LLM_API_KEY --base-url https://your-openai-compatible-endpoint/v1 --remaining-seconds 1800 --max-iterations 3
+    conda run -n methodtrail python -m methodtrail run --contract .\task_contract.json --project-root .\methodtrail_state --project-id feature-study --session-id <session-id> --model your-model-name --api-key-env LLM_API_KEY --base-url https://your-openai-compatible-endpoint/v1 --remaining-seconds 1800 --max-iterations 6
 
     # Roll back to an adopted candidate
     conda run -n methodtrail python -m methodtrail rollback --project-root .\methodtrail_state --project-id feature-study --variant-id <adopted-variant-id>

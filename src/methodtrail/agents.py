@@ -52,13 +52,15 @@ class ChooseAgent:
         hypothesis: HypothesisArtifact,
     ) -> CandidateProposalArtifact:
         user = _context(
-            """Propose two to five distinct next experiments. Each must be executable and tied to the current
+            f"""Propose exactly {contract.proposal_count} distinct next experiments. Each must be executable and tied to the current
 hypothesis and one graph-expansion hint. Separate configuration-only changes from composition, implementation,
 and recovery changes. For every candidate fill method.family, method.components, method.changed_factors, and
 method.target_scope so the program can compare it with the active path. Give realistic expected gain, information
 gain, runtime and failure-risk estimates. The program will attach these as proposed graph branches and rank them
 before one is selected. Do not propose a disconnected change when an existing path can be deepened, ablated,
-combined, or repaired.""",
+combined, or repaired. Follow the task's search_policy: breadth keeps distinct
+families and controls alive; depth prefers a supported direction's composition
+and tuning; balanced explores first and then deepens the strongest path.""",
             contract=contract,
             state=state,
             hypothesis=hypothesis,
@@ -99,7 +101,9 @@ class CodingAgent:
             """Produce a minimal, executable edit plan for the selected experiment. For a new file use a create edit
 with its full contents. For an existing file use a replace edit: old_text must be an exact, unique local snippet and
 new_text is its replacement. Do not return an entire existing file. Do not edit protected or data files. Include the
-required solution entrypoint and keep the change focused on the research question. State a test that should pass.""",
+required solution entrypoint and keep the change focused on the research question. State a test that should pass.
+If the task has no separate configuration file, a configuration experiment may
+change a small source-level constant; keep that edit local and explicit.""",
             contract=contract,
             change=change,
             repository_context=repo_context,
@@ -117,7 +121,8 @@ required solution entrypoint and keep the change focused on the research questio
         user = _context(
             """Repair the implementation that just failed. Read the recorded stderr, diagnosis, and current
 repository files. Return only minimal create or exact replace edits. For replace, old_text must be copied exactly
-from the supplied file context and must identify one local fragment; do not rewrite an entire existing file.
+from the supplied file context and must identify one local fragment. Use create only when the file is absent; use
+replace when it already exists. Do not rewrite an entire existing file.
 Preserve the current research question unless the diagnosis says it cannot be tested. Do not edit protected or data
 files and do not invent results. The revised files will be executed immediately without human intervention.""",
             contract=contract,

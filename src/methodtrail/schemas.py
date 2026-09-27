@@ -53,8 +53,11 @@ class TaskContract(BaseModel):
     maximize_metric: bool = True
     allow_self_reported_metric: bool = False
     timeout_seconds: int = Field(default=1800, ge=1)
-    max_repair_attempts: int = Field(default=2, ge=0, le=5)
+    max_repair_attempts: int = Field(default=4, ge=0, le=8)
     minimum_iterations: int = Field(default=1, ge=1)
+    search_policy: Literal["breadth", "balanced", "depth"] = "balanced"
+    exploration_rounds: int = Field(default=3, ge=0, le=50)
+    proposal_count: int = Field(default=5, ge=1, le=5)
     allowed_dependencies: list[str] = Field(default_factory=list)
     editable_paths: list[str] = Field(default_factory=list)
     protected_paths: list[str] = Field(default_factory=lambda: ["task_contract.json"])
@@ -224,3 +227,23 @@ class ValueWeights(BaseModel):
     beta: float = Field(default=1.0, ge=0.0)
     gamma: float = Field(default=1.0, ge=0.0)
     delta: float = Field(default=1.0, ge=0.0)
+
+    @classmethod
+    def for_search_policy(
+        cls, policy: str, iteration: int, exploration_rounds: int
+    ) -> "ValueWeights":
+        """Choose how strongly the ranker values information versus direct gain.
+
+        ``breadth`` spends early iterations distinguishing alternatives,
+        ``depth`` favors improving a supported direction, and ``balanced``
+        moves from the former to the latter after the configured exploration
+        rounds.  These are planning weights, not learned model parameters.
+        """
+
+        if policy == "breadth":
+            return cls(alpha=0.65, beta=1.55, gamma=0.85, delta=0.95)
+        if policy == "depth":
+            return cls(alpha=1.45, beta=0.75, gamma=1.05, delta=1.10)
+        if iteration <= max(0, exploration_rounds):
+            return cls(alpha=0.85, beta=1.25, gamma=0.90, delta=1.00)
+        return cls(alpha=1.25, beta=0.95, gamma=1.00, delta=1.10)
