@@ -1,0 +1,16 @@
+{
+  "task_id": "openml-credit-g",
+  "description": "Write solution.py to train on train.csv and produce binary predictions.csv for test.csv. The protected evaluator computes accuracy.",
+  "workspace_template": "./task",
+  "allowed_data_paths": ["train.csv", "test.csv"],
+  "solution_entrypoint": "solution.py",
+  "run_command": ["python", "solution.py"],
+  "evaluation_command": ["python", "evaluator.py"],
+  "metric_file": "metrics.json",
+  "required_outputs": ["predictions.csv"],
+  "metric_name": "accuracy",
+  "maximize_metric": true,
+  "timeout_seconds": 300,
+  "allowed_dependencies": ["numpy", "pandas", "scikit-learn"],
+  "protected_paths": ["task_contract.json", "evaluator.py", "test_labels.csv", "metrics.json"]
+}

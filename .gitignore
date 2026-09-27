@@ -1,0 +1,33 @@
+# Runtime state and generated experiment workspaces
+.methodtrail/
+methodtrail_state/
+**/methodtrail_state*/
+**/runs/
+**/prepared/
+**/baseline_run*/
+**/task_*/
+
+# Local caches and Python build output
+.pytest_cache/
+.ruff_cache/
+.deepeval/
+**/.pytest_cache/
+**/.ruff_cache/
+**/.deepeval/
+__pycache__/
+**/__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+
+# Local credentials and environment files
+.env
+.env.*
+!.env.example
+
+# OS/editor files
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
