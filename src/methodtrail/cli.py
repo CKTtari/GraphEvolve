@@ -52,7 +52,12 @@ def main() -> None:
         help="optional JSONL file containing prompts, typed responses and timings",
     )
     run.add_argument("--remaining-seconds", type=int, required=True)
-    run.add_argument("--max-iterations", type=int, default=1)
+    run.add_argument(
+        "--max-iterations",
+        type=int,
+        default=12,
+        help="maximum serial research turns; use 1 for a single turn",
+    )
     run.add_argument("--parent-variant-id", default=None)
     run.add_argument("--trigger", default=None)
     run.add_argument(

@@ -19,7 +19,7 @@ def main() -> None:
     parser.add_argument("--api-key-env", default="DASHSCOPE_API_KEY")
     parser.add_argument("--base-url", default=None)
     parser.add_argument("--budget-seconds", type=int, default=1800)
-    parser.add_argument("--max-iterations", type=int, default=4)
+    parser.add_argument("--max-iterations", type=int, default=8)
     parser.add_argument("--session-id", default=None)
     parser.add_argument("--project-id", default=None)
     args = parser.parse_args()
