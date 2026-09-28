@@ -251,11 +251,18 @@ def _context(instruction: str, **payload: Any) -> str:
     )
 
 
-# Names used by the design document.  The aliases keep older integrations
-# import-compatible while the orchestrator can describe the roles accurately.
-QuestionAgent = ReflectionAgent
-MethodGraphAgent = ChooseAgent
-RepairAgent = RecoveryAgent
+# Names used by the design document.  These thin subclasses preserve the old
+# role APIs while making the state-machine responsibilities explicit.
+class QuestionAgent(ReflectionAgent):
+    """Forms a new question or refines one after valid evidence."""
+
+
+class MethodGraphAgent(ChooseAgent):
+    """Expands the project method pool and selects a graph path."""
+
+
+class RepairAgent(RecoveryAgent):
+    """Diagnoses technical failures without changing the research question."""
 
 
 class AssessmentMemoryAgent:

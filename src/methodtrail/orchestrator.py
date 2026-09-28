@@ -10,11 +10,11 @@ from typing import Any
 
 from .agents import (
     AssessmentMemoryAgent,
-    ChooseAgent,
     CodingAgent,
     EvidenceAgent,
-    RecoveryAgent,
-    ReflectionAgent,
+    MethodGraphAgent,
+    QuestionAgent,
+    RepairAgent,
 )
 from .artifacts import ArtifactStore
 from .execution import Executor, Verifier
@@ -77,14 +77,14 @@ class MethodTrail:
         self.session: SessionRecord | None = None
         self.verifier = Verifier()
         self.executor = Executor()
-        self.question_agent = ReflectionAgent(llm)
-        self.method_graph_agent = ChooseAgent(llm)
+        self.question_agent = QuestionAgent(llm)
+        self.method_graph_agent = MethodGraphAgent(llm)
         # Compatibility attributes for callers of the earlier API.
         self.reflection = self.question_agent
         self.choose = self.method_graph_agent
         self.coding = CodingAgent(llm)
         self.evidence = EvidenceAgent(llm)
-        self.recovery = RecoveryAgent(llm)
+        self.recovery = RepairAgent(llm)
         self.assessment_memory = AssessmentMemoryAgent(llm)
         self.assess = self.assessment_memory.assess_agent
         self.memory_agent = self.assessment_memory.memory_agent
