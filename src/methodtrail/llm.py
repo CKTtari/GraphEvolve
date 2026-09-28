@@ -44,8 +44,14 @@ class OpenAICompatibleLLM:
         )
 
     def complete(self, system: str, user: str, response_model: type[T]) -> T:
-        call_id = uuid.uuid4().hex
-        started = time.perf_counter()
+        """Request one typed artifact, retrying recoverable schema mistakes.
+
+        OpenAI-compatible gateways sometimes return JSON that is syntactically
+        valid but violates a nested validator (for example, a ``replace`` edit
+        with an empty ``old_text``).  That is a model-output error, not a task
+        failure, so give the model a bounded correction attempt before letting
+        the research loop classify a genuine API or execution failure.
+        """
         schema = response_model.model_json_schema()
         # Some OpenAI-compatible gateways accept `json_object` but do not enforce a
         # JSON Schema. Put the exact contract in the prompt as well, so the model
@@ -56,56 +62,68 @@ class OpenAICompatibleLLM:
             "fields:\n"
             + json.dumps(schema, ensure_ascii=False, indent=2)
         )
-        try:
-            response = self.client.chat.completions.create(
-                model=self.model,
-                messages=[
-                    {"role": "system", "content": system},
-                    {"role": "user", "content": user + schema_prompt},
-                ],
-                response_format={"type": "json_object"},
-                temperature=0.2,
-            )
-            content = response.choices[0].message.content or "{}"
-        except (
-            Exception
-        ) as exc:  # API exceptions need to become useful recovery evidence.
+        correction = ""
+        for attempt in range(3):
+            call_id = uuid.uuid4().hex
+            started = time.perf_counter()
+            request_user = user + schema_prompt + correction
+            try:
+                response = self.client.chat.completions.create(
+                    model=self.model,
+                    messages=[
+                        {"role": "system", "content": system},
+                        {"role": "user", "content": request_user},
+                    ],
+                    response_format={"type": "json_object"},
+                    temperature=0.2 if attempt == 0 else 0.0,
+                )
+                content = response.choices[0].message.content or "{}"
+            except Exception as exc:  # API errors remain visible to recovery.
+                self._log_call(
+                    call_id,
+                    response_model,
+                    system,
+                    request_user,
+                    None,
+                    started,
+                    error=f"{type(exc).__name__}: {exc}",
+                )
+                raise RuntimeError(
+                    f"LLM request failed: {type(exc).__name__}: {exc}"
+                ) from exc
+            try:
+                parsed = response_model.model_validate_json(_json_object(content))
+            except Exception as exc:
+                self._log_call(
+                    call_id,
+                    response_model,
+                    system,
+                    request_user,
+                    content,
+                    started,
+                    error=f"{type(exc).__name__}: {exc}",
+                )
+                if attempt < 2:
+                    correction = (
+                        "\n\nYour previous JSON failed validation with this error:\n"
+                        f"{exc}\nReturn a corrected JSON object only. Preserve the research question. "
+                        "For FileEdit, use operation=create only for an absent file; "
+                        "for operation=replace provide a non-empty exact old_text snippet."
+                    )
+                    continue
+                raise RuntimeError(
+                    f"LLM response did not match {response_model.__name__}; expected schema keys: {list(schema.get('properties', {}))}"
+                ) from exc
             self._log_call(
                 call_id,
                 response_model,
                 system,
-                user + schema_prompt,
-                None,
-                started,
-                error=f"{type(exc).__name__}: {exc}",
-            )
-            raise RuntimeError(
-                f"LLM request failed: {type(exc).__name__}: {exc}"
-            ) from exc
-        try:
-            parsed = response_model.model_validate_json(_json_object(content))
-        except Exception as exc:
-            self._log_call(
-                call_id,
-                response_model,
-                system,
-                user + schema_prompt,
+                request_user,
                 content,
                 started,
-                error=f"{type(exc).__name__}: {exc}",
             )
-            raise RuntimeError(
-                f"LLM response did not match {response_model.__name__}; expected schema keys: {list(schema.get('properties', {}))}"
-            ) from exc
-        self._log_call(
-            call_id,
-            response_model,
-            system,
-            user + schema_prompt,
-            content,
-            started,
-        )
-        return parsed
+            return parsed
+        raise RuntimeError(f"LLM response did not match {response_model.__name__}")
 
     def _log_call(
         self,
