@@ -9,11 +9,10 @@ from pathlib import Path
 from typing import Any
 
 from .agents import (
-    AssessAgent,
+    AssessmentMemoryAgent,
     ChooseAgent,
     CodingAgent,
     EvidenceAgent,
-    MemoryAgent,
     RecoveryAgent,
     ReflectionAgent,
 )
@@ -29,6 +28,7 @@ from .schemas import (
     AssessmentArtifact,
     CandidatePath,
     ChangeRequestArtifact,
+    HypothesisArtifact,
     MutationClass,
     PathNode,
     ResearchState,
@@ -48,6 +48,8 @@ class IterationResult:
     assessment: AssessmentArtifact | None
     next_hypothesis: str | None
     artifact_ids: dict[str, str]
+    hypothesis: HypothesisArtifact | None = None
+    resume_mode: str = "research"
 
 
 class MethodTrail:
@@ -75,17 +77,27 @@ class MethodTrail:
         self.session: SessionRecord | None = None
         self.verifier = Verifier()
         self.executor = Executor()
-        self.reflection = ReflectionAgent(llm)
-        self.choose = ChooseAgent(llm)
+        self.question_agent = ReflectionAgent(llm)
+        self.method_graph_agent = ChooseAgent(llm)
+        # Compatibility attributes for callers of the earlier API.
+        self.reflection = self.question_agent
+        self.choose = self.method_graph_agent
         self.coding = CodingAgent(llm)
         self.evidence = EvidenceAgent(llm)
         self.recovery = RecoveryAgent(llm)
-        self.assess = AssessAgent(llm)
-        self.memory_agent = MemoryAgent(llm)
+        self.assessment_memory = AssessmentMemoryAgent(llm)
+        self.assess = self.assessment_memory.assess_agent
+        self.memory_agent = self.assessment_memory.memory_agent
 
     def _ensure_project_session(self, contract: TaskContract) -> None:
         if self.project is None:
             self.project = self.projects.ensure_project(contract, self.project_id)
+            if self.project.incumbent_metric is None and self.project.incumbent_variant_id:
+                incumbent = self.projects.get_candidate(
+                    self.project, self.project.incumbent_variant_id
+                )
+                if incumbent is not None:
+                    self.project.incumbent_metric = incumbent.metric
             project_path = self.projects.project_path(self.project)
             self.graph = ExperimentPathGraph(project_path / "memory" / "experiment_graph.json")
             self.portfolio = PortfolioManager(project_path / "memory" / "portfolio.json")
@@ -100,6 +112,7 @@ class MethodTrail:
         remaining_seconds: int,
         parent_variant_id: str | None = None,
         trigger: str | None = None,
+        hypothesis_override: HypothesisArtifact | None = None,
     ) -> IterationResult:
         self._ensure_project_session(contract)
         assert self.project is not None and self.session is not None
@@ -118,12 +131,26 @@ class MethodTrail:
             "research_state",
             {"artifact_id": state_id, "iteration": state.iteration},
         )
-        hypothesis = self.reflection.refine(contract, state, trigger)
+        # A technical repair resumes the exact same research question.  The
+        # question agent is called only for a genuinely new research round or
+        # after valid evidence changes the question.
+        hypothesis = hypothesis_override or self.reflection.refine(contract, state, trigger)
         hypothesis_id = self.store.put("hypothesis", hypothesis, [state_id])
         proposals = self.choose.propose(contract, state, hypothesis)
         attached = self.graph.attach_proposals(
             graph_parent_variant_id, proposals.candidates, state.iteration
         )
+        # Existing unexecuted nodes remain in the same comparison set as new
+        # proposals.  This is the project method pool: the LLM can revisit an
+        # earlier direction when new evidence changes its priority.
+        existing_ids = {proposal_id for proposal_id, _ in attached}
+        for proposal_id, change in self.graph.frontier_changes(limit=50):
+            if proposal_id not in existing_ids:
+                attached.append((proposal_id, change))
+        if not attached:
+            raise RuntimeError(
+                "method discovery produced no new or revisitable executable node"
+            )
         proposal_node_ids = [proposal_node_id for proposal_node_id, _ in attached]
         proposals = proposals.model_copy(
             update={"candidates": [change for _, change in attached]}
@@ -143,9 +170,10 @@ class MethodTrail:
             )
             for index, change in enumerate(proposals.candidates)
         ]
-        weights = ValueWeights.for_search_policy(
-            contract.search_policy, state.iteration, contract.exploration_rounds
-        )
+        # Candidate count and exploration phase are not fixed task parameters.
+        # The method graph supplies the relevant alternatives; this formula
+        # provides a transparent baseline for comparing their measured value.
+        weights = ValueWeights()
         ranked = self.graph.rank(
             candidates,
             remaining_seconds,
@@ -189,7 +217,7 @@ class MethodTrail:
             self.project,
             self.session,
             contract,
-            code_parent_variant_id,
+            change.parent_variant_id or code_parent_variant_id,
         )
         workspace = Path(candidate.workspace)
         repo_context = RepoMap(workspace).retrieve(
@@ -215,7 +243,7 @@ class MethodTrail:
         except (PermissionError, ValueError) as exc:
             self.projects.record_candidate(self.project, candidate, status="failed")
             result = self._recover_from_preflight(
-                contract, state, change, workspace, str(exc), [plan_id]
+                contract, state, change, workspace, str(exc), [plan_id], hypothesis
             )
             assert result.run is not None
             self._record_failed_outcome(
@@ -242,7 +270,7 @@ class MethodTrail:
             )
             self.projects.record_candidate(self.project, candidate, status="failed")
             result = self._recover_from_preflight(
-                contract, state, change, workspace, detail, [verify_id]
+                contract, state, change, workspace, detail, [verify_id], hypothesis
             )
             assert result.run is not None
             self._record_failed_outcome(
@@ -254,18 +282,22 @@ class MethodTrail:
         run = self.executor.run(workspace, contract)
         run_id = self.store.put("run", run, [verify_id])
         repair_ids: list[str] = []
-        repair_attempt = 0
+        repair_step = 0
+        last_recovery = None
         while (
             (run.return_code != 0 or run.timed_out or run.metric is None)
-            and repair_attempt < contract.max_repair_attempts
+            and repair_step < contract.max_repair_steps
         ):
-            repair_attempt += 1
+            repair_step += 1
             recovery = self.recovery.diagnose(contract, state, run)
+            last_recovery = recovery
             recovery_id = self.store.put("recovery", recovery, [run_id])
             repair_ids.append(recovery_id)
+            if recovery.action == "abandon_candidate":
+                break
             repair_change = change.model_copy(
                 update={
-                    "title": f"repair {repair_attempt}: {change.title}",
+                    "title": f"repair {repair_step}: {change.title}",
                     "mutation_class": MutationClass.RECOVERY,
                     "relation": "recover",
                     "rationale": recovery.diagnosis,
@@ -295,7 +327,7 @@ class MethodTrail:
                     timed_out=False,
                     wall_seconds=0.0,
                     stdout="",
-                    stderr=f"repair attempt {repair_attempt} could not be applied: {exc}",
+                    stderr=f"repair step {repair_step} could not be applied: {exc}",
                 )
                 run_id = self.store.put("run", run, [repair_plan_id])
                 continue
@@ -311,7 +343,7 @@ class MethodTrail:
                     timed_out=False,
                     wall_seconds=0.0,
                     stdout="",
-                    stderr=f"repair attempt {repair_attempt} failed verification: {detail}",
+                    stderr=f"repair step {repair_step} failed verification: {detail}",
                 )
                 run_id = self.store.put("run", run, [verify_id])
                 continue
@@ -321,7 +353,7 @@ class MethodTrail:
             self.projects.record_candidate(
                 self.project, candidate, status="failed", metric=run.metric
             )
-            recovery = self.recovery.diagnose(contract, state, run)
+            recovery = last_recovery or self.recovery.diagnose(contract, state, run)
             recovery_id = self.store.put("recovery", recovery, [run_id])
             self._record_failed_outcome(
                 contract, change, candidate, run, proposal_node_id
@@ -332,8 +364,10 @@ class MethodTrail:
                 change=change,
                 run=run,
                 assessment=None,
-                next_hypothesis=recovery.return_to_reflection_reason,
-                artifact_ids={
+            next_hypothesis=(
+                recovery.return_to_reflection_reason if last_recovery else None
+            ),
+            artifact_ids={
                     "state": state_id,
                     "hypothesis": hypothesis_id,
                     "change": change_id,
@@ -342,6 +376,8 @@ class MethodTrail:
                     "recovery": recovery_id,
                     "repair": repair_ids,
                 },
+                hypothesis=hypothesis,
+                resume_mode="technical",
             )
             self._write_handoff(result)
             return result
@@ -357,6 +393,19 @@ class MethodTrail:
                     "reason": (
                         f"The primary metric was measured, but declared metric constraints failed: "
                         f"{contract.metric_constraints}."
+                    ),
+                }
+            )
+        if assessment.decision == "adopt" and not self._metric_improves_incumbent(
+            contract, run.metric
+        ):
+            assessment = assessment.model_copy(
+                update={
+                    "decision": "defer",
+                    "reason": (
+                        "The measured candidate did not improve the project-wide "
+                        f"incumbent ({self.project.incumbent_metric}); it remains "
+                        "available in the method graph for further evidence."
                     ),
                 }
             )
@@ -395,6 +444,7 @@ class MethodTrail:
 
         remaining_seconds = total_seconds
         trigger: str | None = None
+        pending_hypothesis: HypothesisArtifact | None = None
         current_parent = parent_variant_id
         results: list[IterationResult] = []
         for _ in range(max_iterations):
@@ -406,6 +456,7 @@ class MethodTrail:
                 remaining_seconds=remaining_seconds,
                 parent_variant_id=current_parent,
                 trigger=trigger,
+                hypothesis_override=pending_hypothesis,
             )
             results.append(result)
             # The budget covers the complete research turn, including LLM
@@ -419,6 +470,9 @@ class MethodTrail:
             ):
                 break
             trigger = result.next_hypothesis
+            pending_hypothesis = (
+                result.hypothesis if result.resume_mode == "technical" else None
+            )
             if result.assessment and result.assessment.decision == "adopt":
                 current_parent = result.artifact_ids.get("variant", current_parent)
         if self.project is not None and self.session is not None:
@@ -434,6 +488,17 @@ class MethodTrail:
                 ),
             )
         return results
+
+    def _metric_improves_incumbent(
+        self, contract: TaskContract, metric: float | None
+    ) -> bool:
+        """Keep adoption monotonic without blocking exploration of weaker nodes."""
+
+        if metric is None or self.project is None or self.project.incumbent_metric is None:
+            return metric is not None
+        if contract.maximize_metric:
+            return metric > self.project.incumbent_metric
+        return metric < self.project.incumbent_metric
 
     def _finalize_best_valid_candidate(self, contract: TaskContract) -> None:
         """Persist the strongest valid candidate if exploration produced no adoption.
@@ -454,7 +519,7 @@ class MethodTrail:
                 self.project, self.session.session_id
             )
             if candidate.metric is not None
-            and candidate.status in {"needs_evidence", "deferred"}
+            and candidate.status in {"needs_evidence", "deferred", "promising"}
             and (Path(candidate.workspace) / contract.solution_entrypoint).exists()
         ]
         if not viable:
@@ -484,6 +549,7 @@ class MethodTrail:
         workspace: Path,
         detail: str,
         parent_ids: list[str],
+        hypothesis: HypothesisArtifact | None = None,
     ) -> IterationResult:
         run = RunArtifact(
             command=contract.run_command,
@@ -503,6 +569,8 @@ class MethodTrail:
             assessment=None,
             next_hypothesis=recovery.return_to_reflection_reason,
             artifact_ids={"recovery": recovery_id},
+            hypothesis=hypothesis,
+            resume_mode="technical",
         )
 
     def _complete_assessment(
@@ -592,6 +660,12 @@ class MethodTrail:
             artifact_ids["memory"] = memory_id
             variant_id = candidate.variant_id
             artifact_ids["variant"] = variant_id
+            node_status = (
+                "promising"
+                if assessment.decision == "defer"
+                and (change.information_gain > 0 or bool(assessment.next_question))
+                else "deferred"
+            )
             self.graph.add_node(
                 PathNode(
                     variant_id=variant_id,
@@ -605,14 +679,14 @@ class MethodTrail:
                     metric=run.metric,
                     wall_seconds=run.wall_seconds,
                     failure_risk=change.failure_risk,
-                    status="adopted" if assessment.decision == "adopt" else "deferred",
+                    status="adopted" if assessment.decision == "adopt" else node_status,
                     method=change.method,
                 )
             )
             self.graph.record_outcome(
                 proposal_node_id,
                 variant_id,
-                "adopted" if assessment.decision == "adopt" else "deferred",
+                "adopted" if assessment.decision == "adopt" else node_status,
             )
             self.portfolio.register(
                 VariantProfile(
@@ -662,7 +736,7 @@ class MethodTrail:
                 )
             else:
                 self.projects.record_candidate(
-                    self.project, candidate, status="deferred", metric=run.metric
+                    self.project, candidate, status=node_status, metric=run.metric
                 )
         elif assessment.decision == "stop":
             memory = self.memory_agent.summarize(contract, change, run, assessment)
@@ -829,9 +903,9 @@ class MethodTrail:
         candidates = self.projects.session_candidates(
             self.project, self.session.session_id
         )
-        recent_candidates = candidates[-5:]
+        recent_candidates = candidates[-8:]
         facts = []
-        best_metric = None
+        best_metric = self.project.incumbent_metric
         for candidate in recent_candidates:
             metric = candidate.metric
             if metric is not None:
@@ -854,6 +928,10 @@ class MethodTrail:
             iteration=len(candidates) + 1,
             remaining_seconds=remaining_seconds,
             best_metric=best_metric,
+            incumbent_metric=self.project.incumbent_metric,
+            incumbent_variant_id=self.project.incumbent_variant_id,
+            research_round=len(candidates) + 1,
+            repair_step=0,
             recent_facts=facts,
             unresolved_questions=[
                 event["payload"].get("next_question", "")
@@ -872,6 +950,7 @@ class MethodTrail:
                 )
             ],
             memory_context=self.experiment_memory.search(contract.task_id, query),
+            method_pool=self.graph.method_pool(limit=100),
         )
 
     def export_trajectory(self, target: str | Path) -> Path:

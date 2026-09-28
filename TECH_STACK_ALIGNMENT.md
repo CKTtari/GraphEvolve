@@ -99,9 +99,9 @@ Memory：更新实验路径图、版本组合和后续优先级
 
 | 模块 | 建议组件 | 作用 |
 |---|---|---|
-| LLM 接口 | DashScope-compatible OpenAI client + Pydantic structured output | 用同一套 Agent 协议接兼容模型；每次输出解析为确定对象 |
+| LLM 接口 | OpenAI-compatible client + Pydantic structured output | 以模型无关的协议承载问题形成、方法图扩展、评估和修复；每次输出解析为确定对象 |
 | 仓库理解 | 当前使用 Python AST、文件树和导入记录；`ripgrep`、tree-sitter、测试图后续可接入 | 给 Coding Agent 提供相关文件、符号和调用线索 |
-| 工作区 | 当前使用复制父版本的独立工作区；Git worktree 后续可接入 | 每次实验有独立代码版本，失败补丁不会污染父版本 |
+| 工作区 | Git worktree 与独立候选分支 | 每次实验有独立代码版本，失败补丁不会污染父版本 |
 | 执行 | `subprocess`、超时、stdout/stderr 和独立评测命令 | 让 Recovery 根据实际错误和资源事实工作；GPU telemetry 后续可接入 |
 | 验证 | 当前使用 `py_compile`、依赖白名单、任务声明的 smoke/test 命令和输出检查；Ruff/Pytest 用于工程自身 | 代码能否运行与任务效果分开测量 |
 

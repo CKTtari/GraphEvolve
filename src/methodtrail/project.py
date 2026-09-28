@@ -34,6 +34,7 @@ class ProjectRecord:
     incumbent_variant_id: str | None
     created_at: str
     updated_at: str
+    incumbent_metric: float | None = None
 
 
 @dataclass
@@ -128,6 +129,7 @@ class ProjectManager:
             incumbent_variant_id=None,
             created_at=now,
             updated_at=now,
+            incumbent_metric=None,
         )
         self._write_json(metadata_path, asdict(record))
         return record
@@ -258,6 +260,7 @@ class ProjectManager:
         self.record_candidate(project, candidate, status="adopted", metric=metric)
         project.incumbent_commit = candidate.commit
         project.incumbent_variant_id = candidate.variant_id
+        project.incumbent_metric = metric
         project.updated_at = _now()
         self._write_json(self._project_dir(project) / "project.json", asdict(project))
         return candidate
@@ -306,6 +309,7 @@ class ProjectManager:
             raise ValueError("incumbent can only point to an adopted candidate")
         project.incumbent_variant_id = candidate.variant_id
         project.incumbent_commit = candidate.commit
+        project.incumbent_metric = candidate.metric
         project.updated_at = _now()
         self._write_json(self._project_dir(project) / "project.json", asdict(project))
         return project

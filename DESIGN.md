@@ -9,7 +9,9 @@ The project name is **GraphEvolve: a graph-guided autonomous experiment system**
 - **Method** covers model families, feature construction, training settings, fusion rules, validation designs, and code implementations.
 - **Trail** is the evidence trail showing how one experiment led to the next.
 
-The system follows a serial research process, four specialized agents, graph-organized experiment memory, and value-aware path choice. It is not tied to one model family or benchmark.
+The system follows a serial research process, a project-wide method graph, a
+separate technical repair loop, and value-aware path choice. It is not tied to
+one model family or benchmark.
 
 ## 1. Goal
 
@@ -47,12 +49,13 @@ MethodTrail does not start from a supplied predictive model. A task adapter supp
 
 ## 3. Main research process
 
-`Task → Choose → Code → Execute → Record → Assess`
+`Task → Question → Method graph → Code → Execute → Record → Assess`
 
 | Stage | Responsibility | Output |
 |---|---|---|
-| Task | Assemble the current question, budget, relevant graph subgraph, existing best result, and unresolved evidence | `ResearchState` |
-| Choose | Expand candidate paths, estimate their value, and select an executable experiment | `ExperimentSpecArtifact` |
+| Task | Assemble the current question, budget, relevant graph subgraph, global method pool, existing best result, and unresolved evidence | `ResearchState` |
+| Question | Form or refine one measurable question from the task and valid evidence | `HypothesisArtifact` |
+| Method graph | Add new method nodes, relate them to existing nodes, score paths, and select one executable experiment | `ExperimentSpecArtifact` |
 | Code | Read the selected change request, write or patch the predictor workspace, then run interface and smoke checks | `ImplementationArtifact` |
 | Execute | Materialize source and configuration in an isolated workspace, then train and evaluate | `RunArtifact` |
 | Record | Save actual source revision, config, metrics, runtime, resources, logs, and prediction files | persistent run record |
@@ -60,16 +63,17 @@ MethodTrail does not start from a supplied predictive model. A task adapter supp
 
 `Task` assembles the present working state. It does not simply reread the task statement after every experiment.
 
-### Specialized research agents
+### Specialized agents and workers
 
 | Agent | Trigger | Responsibility | Return point |
 |---|---|---|---|
-| Reflection Agent | idea is broad, ambiguous, or based on an early observation | refine the hypothesis and specify evidence needed | Choose |
-| Evidence Agent | local and external results disagree, evidence is incomplete, or subgroup behavior is unclear | design ablation, control, or segmented validation | Reflection |
-| Recovery Agent | parameters, code, resources, environment, or output generation fail | explain feasible repair, lighter implementation, or nearby substitute while retaining the research question where possible | Reflection |
-| Memory Agent | the run produces a reusable positive or negative conclusion | write a graph node, conditions, relations, and updated path priorities | Choose |
+| Question Agent (`new_question`) | a new task or a broad unresolved direction | form a measurable hypothesis and evidence plan | Method graph |
+| Question Agent (`conflict_refinement`) | a valid run is incomplete, inconsistent, or needs an ablation | narrow the question without changing it because of a code error | Method graph |
+| Method Graph Agent | a research question is ready | grow the project-wide method pool, create graph relations, score paths, and choose one node | Coding |
+| Assessment-Memory Agent | a valid run has returned | compare evidence, set node status, store conditions, and choose the next research route | Method graph or Question |
+| Repair Agent | code, dependency, resource, or output execution fails | repair the same candidate, switch to a nearby implementation, or abandon it; it never rewrites the research question | the same candidate or Method graph |
 
-The orchestrator is the only owner of runtime state. Reflection clarifies a research target before Choose; Evidence turns an uncertain result into a narrower Reflection request; Recovery writes technical constraints back to Reflection, which decides whether the original question can still be tested. These agents are state-specific LLM roles, not separate parallel chatbots.
+The controller is the only owner of runtime state. Question formation, method selection, valid-run assessment, memory writing, and technical repair are separate transitions. A repair step does not increase the research-round count and does not call the Question Agent. The system runs one experiment at a time; the method graph and append-only memory retain every useful or failed branch.
 
 ### Coding Agent
 
@@ -168,12 +172,28 @@ Path priority starts from the LLM's estimates, then applies a bounded historical
 
 ## 7. Candidate generation and selection
 
-Choose builds candidates from four sources:
+The method graph starts with a task root, not a prewritten predictor. The first
+method nodes are proposed from the task contract, data profile, available
+libraries, and the current question. A new task therefore begins from zero
+method knowledge; a resumed project restores its own method pool and evidence.
 
-1. Graph-neighbor expansion derives `deepen`, `ablate`, `combine`, `repair`, or `revisit` paths from relevant nodes.
-2. The task contract exposes data schemas, metric functions, permitted dependencies, resource limits, output requirements, and code interfaces. It does not provide a ready-made predictor.
-3. An LLM extension proposes a new implementation or composition through the task's typed capability and file-access schema.
-4. A Recovery proposal adds a technically feasible alternative after execution fails.
+The Method Graph Agent may add any number of distinct nodes in one discovery
+step, including none when the current pool already contains enough relevant
+alternatives. There is no fixed `proposal_count`. Each new node is normalized
+against the project method pool before it is attached to the graph. Existing
+nodes are revisited rather than duplicated.
+
+Candidates come from four sources:
+
+1. Graph-neighbor expansion derives `deepen`, `ablate`, `combine`, `repair`, or
+   `revisit` paths from relevant nodes.
+2. The task contract exposes data schemas, metric functions, permitted
+   dependencies, resource limits, output requirements, and code interfaces. It
+   does not provide a ready-made predictor.
+3. The LLM proposes a new implementation or composition through the task's
+   typed capability and file-access schema.
+4. A repair result may add a nearby implementation node that tests the same
+   research question.
 
 Free-form suggestions are never executed directly. Every candidate becomes a ChangeRequest Artifact and then an implementation plan or controlled patch that passes workspace checks.
 
@@ -246,7 +266,12 @@ P_s = \frac{V_s}{1 + \gamma_s T_s + \delta_s R_s}
 | \(R_s\) | execution risk | program using failure history, resource demand, and complexity |
 | \(P_s\) | final candidate priority | program calculation |
 
-The LLM can change weights by research stage: early exploration raises \(\beta_s\) to favor discriminating experiments; a supported direction raises \(\alpha_s\) to favor focused improvement; a tight budget raises \(\gamma_s\) and \(\delta_s\) to favor reliable runs that can finish.
+The default calculation uses transparent unit weights. The LLM supplies the
+candidate's expected improvement and information value, while the program
+derives runtime and failure risk from the method graph and execution history.
+Task-specific stage coefficients are not hidden in the contract. Any change to
+the scoring rule is itself a versioned harness change and is recorded in the
+project history.
 
 The LLM sees program-sorted candidates. If it selects a lower-ranked path, it must record a concrete reason. Selected and deferred candidates both remain in the Decision Artifact.
 
@@ -259,7 +284,10 @@ Every implementation written by the Coding Agent is stored as a code variant lin
 - a reliable variant with few execution failures;
 - distinct variants that solve the task through materially different assumptions.
 
-Choose retrieves candidates from this archive and from graph neighbors. It can deepen a strong implementation, compare a sibling variant that changes one factor, combine two compatible variants, or revive a deferred branch when new evidence changes the estimate.
+The Method Graph Agent retrieves candidates from this archive and from graph
+neighbors. It can deepen a strong implementation, compare a sibling variant
+that changes one factor, combine two compatible variants, or revive a deferred
+branch when new evidence changes the estimate.
 
 The archive uses measured metric, runtime, reliability, and relationship to the active question. It does not discard a slower or lower-scoring variant when that variant provides a capability or evidence path the current best implementation lacks.
 
@@ -276,9 +304,9 @@ Code changes are evaluated in increasing-cost order:
 
 At each layer, the executor writes observations back to the active Run Artifact. A failure before full training is still evidence for Recovery and later path-risk estimates.
 
-## 8. Reflection, Evidence, Recovery, and Memory
+## 8. Question, Assessment, Recovery, and Memory
 
-### Reflection Agent
+### Question Agent: `new_question`
 
 Reflection converts an initial observation into a precise research target. It receives the current task, relevant path nodes, recent evidence, and remaining budget. It returns a hypothesis, evidence request, comparison plan, success condition, fallback condition, and candidate-generation hints.
 
@@ -292,9 +320,10 @@ Adoption: positive evidence for the target group without material overall regres
 Fallback: retain the two-source ranker and test the third source as a low-weight component.
 ```
 
-Reflection sets the task target. Choose selects the concrete model, feature, parameter, and implementation changes.
+The Question Agent sets the task target. The Method Graph Agent selects the
+concrete model, feature, parameter, and implementation changes.
 
-### Evidence Agent
+### Question Agent: `conflict_refinement`
 
 Evidence handles results that remain uncertain. It treats conflicts as a localization problem.
 
@@ -306,31 +335,50 @@ Trigger examples:
 - several changes occur in one run;
 - different seeds produce inconsistent results.
 
-Evidence compares a candidate with its parent, identifies changed components, specifies missing evidence, and requests ablations, matched controls, group comparisons, or repeated confirmation. It then returns a narrower question to Reflection.
+The same Question Agent compares a candidate with its parent, identifies
+changed components, specifies missing evidence, and requests ablations, matched
+controls, group comparisons, or repeated confirmation. It returns a narrower
+question to the Method Graph Agent; a technical error never triggers this mode.
 
 ### Recovery Agent
 
-Recovery starts after Execute finds a technical problem.
+Recovery starts after Execute finds a technical problem. It is an internal
+repair loop, not a research iteration. The current hypothesis, method target,
+and parent node stay fixed until the candidate runs successfully or the Repair
+Agent explicitly abandons it.
 
 | Repair direction | Action |
 |---|---|
 | Parameter repair | correct invalid or unstable settings while preserving the intended comparison |
 | Lower-cost implementation | use a cheaper implementation that tests the same question |
 | Neighbor-path replacement | choose a graph-adjacent method that can test a similar question |
-| Code patch | write a constrained set of complete files in the isolated run workspace |
-| Question revision | return to Reflection when the target cannot be tested under current constraints |
+| Code patch | write a constrained local patch in the isolated run workspace |
+| Abandon candidate | record the technical cause and return to the method graph without changing the question |
 
-The LLM receives only relevant source files, traceback, task interface, current hypothesis, and similar past repairs. It returns a diagnosis, feasible repair directions, expected effect, and validation requirements. Reflection decides whether to preserve or revise the research question; Choose then produces a new ChangeRequest for Coding. The executor runs syntax checks and an adapter smoke test before launching full training. Each repair attempt becomes a Recovery Artifact.
+The LLM receives relevant source files, traceback, task interface, current
+hypothesis, and similar past repairs. It returns one of three actions:
+`continue_repair`, `switch_implementation`, or `abandon_candidate`. The
+controller allows a large technical-step safety cap (`max_repair_steps`,
+default 100) and lets the Repair Agent stop earlier. These steps do not count
+as research rounds. The executor runs syntax checks and an adapter smoke test
+before launching full training. Each repair step becomes a Recovery Artifact;
+only a successful run or an explicit abandonment returns control to method
+selection.
 
 ### Memory Agent
 
-Memory runs after Assess identifies a reusable result. It:
+The Assessment-Memory Agent runs after a valid measurement. It:
 
 1. summarizes the question, actual change, result, and supporting evidence;
 2. states the conditions where the conclusion applies or does not apply;
-3. creates a path node for the selected implementation;
-4. connects parent, sibling, and likely future candidate paths;
-5. supplies conditions and evidence that will affect the next candidate ranking.
+3. creates or updates a method node, including useful negative and promising
+   results;
+4. connects parent, sibling, and future candidate paths;
+5. updates node status and path priority for the next selection.
+
+The final output is always chosen from the best measured valid node. A lower
+scoring but informative or promising node remains in the graph and can be
+expanded later; it never silently replaces the project incumbent.
 
 Example memory note:
 
@@ -386,7 +434,9 @@ An external feedback connector can later feed its result into Evidence. The curr
 
 ### LLM providers
 
-MethodTrail currently ships with one OpenAI-compatible client. It uses DashScope's compatible endpoint by default and can receive another compatible base URL.
+MethodTrail currently ships with one OpenAI-compatible client. The endpoint and
+model are launch-time settings; the benchmark configuration uses `gpt-6-luna`
+through its configured compatible endpoint.
 
 The provider layer supports typed JSON responses, model identifiers, and failure propagation into Recovery. Credentials are read from the API-key environment variable selected at launch; the default is `DASHSCOPE_API_KEY`.
 
@@ -408,9 +458,13 @@ SQLite currently stores typed artifacts in one append-only `artifacts` table wit
 
 ### Orchestrator states
 
-The sequence is `INITIALIZE → ASSEMBLE_TASK_STATE → REFLECT_IF_NEEDED → GENERATE_CANDIDATES → SCORE_AND_CHOOSE → MATERIALIZE → EXECUTE → RECORD → ASSESS`.
+The sequence is `INITIALIZE → ASSEMBLE_TASK_STATE → QUESTION_IF_NEEDED → EXPAND_METHOD_GRAPH → SCORE_AND_CHOOSE → MATERIALIZE → EXECUTE → RECORD → ASSESS`.
 
-From Assess, the system can adopt and remember a result, seek more evidence, recover from a technical failure, defer a result, or stop.
+From Execute, technical failures enter a separate `REPAIR` state. Repair steps
+do not increment the research-round counter. A successful repair returns to the
+same candidate; an abandoned repair returns to method selection. From Assess,
+the system can adopt and remember a result, keep a promising or incomplete
+branch for more evidence, expand the method graph, or stop.
 
 The current multi-round runner stops on an Agent `stop` decision, exhausted time budget, or its configured iteration limit. Automatic packaging of final deliverables is a later extension.
 
@@ -421,11 +475,11 @@ The project contains `agents`, `artifacts`, `execution`, `path_graph`, `portfoli
 ## 11. Implementation sequence
 
 1. Artifact schemas, SQLite repository, run-state machine, and run file layout.
-2. DashScope and OpenAI-compatible providers with typed JSON validation.
+2. OpenAI-compatible providers with typed JSON validation.
 3. Task-contract protocol plus MLE-bench, SWE-bench, and Terminal-Bench contract adapters with no built-in predictors.
 4. Isolated execution workspace, independent metric collection, optional smoke/test commands, and output validation.
 5. Experiment graph, subgraph retrieval, candidate expansion, and path-value calculation.
-6. Reflection, Evidence, Memory, Recovery, and Coding Agent collaboration.
+6. Question, Method Graph, Assessment-Memory, Repair, and Coding Agent collaboration.
 7. Code-variant archive, controlled patch flow, and repair-history integration.
 8. External evaluator connector and feedback ingestion.
 9. Replay commands, graph visualization, reports, and benchmark-scale integration tests.
@@ -434,7 +488,9 @@ Each stage must run through the actual orchestrator and actual training code. Th
 
 ## 12. Implementation assumptions to confirm
 
-1. DashScope/Qwen is the default provider; OpenAI-compatible APIs are supported as an alternative.
+1. The runtime is provider-agnostic. The current benchmark uses an
+   OpenAI-compatible endpoint with `gpt-6-luna`; no provider-specific model is
+   assumed by the agent roles.
 2. The design includes an external-evaluation connector interface. Automatic submission remains disabled until an evaluator API and authorization are provided.
 3. The LLM may patch task adapters and experiment implementations inside a run workspace; GraphEvolve core, credentials, and configured data roots remain read-only.
 4. One experiment runs at a time by default. The selected adapter may use a configured GPU.
@@ -446,16 +502,19 @@ The design draws practical implementation patterns from OpenEvolve and the Aweso
 
 ## 14. Coding-agent architecture
 
-MethodTrail has one main research agent, a Coding Agent embedded in the Code stage, and four sub-agents that each own one return path: Reflection, Evidence, Recovery, and Memory. The following work roles remain separate because they operate at different moments in the research process:
+MethodTrail has one deterministic research controller, four decision roles, and
+one coding worker. The four decision roles correspond to question formation,
+method-graph expansion, valid-run assessment/memory, and technical repair.
+Coding writes the selected implementation but never changes the research
+objective or adoption rule.
 
 | Role | Decides | Does not decide |
 |---|---|---|
-| Main research agent: Task / Choose / Assess | what question and candidate path are worth the next run, and whether the result should be adopted | whether generated code is technically valid |
-| Coding Agent: Code | how a selected change request becomes source code and tests | the research objective or adoption decision |
-| Reflection sub-agent | what question and evidence plan should guide the next experiment | exact source-code implementation |
-| Evidence | how to isolate a conflict or missing piece of evidence | arbitrary implementation rewrites without a defined comparison |
-| Recovery | how to repair a technical failure while retaining the question where possible | whether a technically successful run should be adopted |
-| Memory | what conclusion and conditions should enter the path graph | whether to fabricate evidence not present in run artifacts |
+| Question Agent | what question and evidence plan should guide the next experiment, in `new_question` or `conflict_refinement` mode | exact source-code implementation |
+| Method Graph Agent | which new or existing method node should be evaluated next | whether code is technically valid |
+| Assessment-Memory Agent | how a valid result changes node status, conditions, and path priority | whether to invent a metric or overwrite the global best |
+| Repair Agent | whether to continue repair, switch implementation, or abandon a technical candidate | whether the research hypothesis is disproved by a code failure |
+| Coding Agent | how a selected change becomes source code and tests | the research objective or adoption decision |
 
 Three functions are deliberately programmatic services rather than additional LLM agents:
 
@@ -579,9 +638,14 @@ Portfolio Manager uses this vector for Pareto retention. Offline learning export
 
 ## 17. Candidate search policy
 
-The graph provides the candidate neighborhood; it does not dictate one fixed search algorithm. In the first implementation, Choose ranks a compact set of graph-adjacent candidates with the path-priority function, keeps a small Pareto set, and asks the LLM to select a candidate only after it has read the supporting and conflicting evidence.
+The graph provides the candidate neighborhood and the project-wide method pool.
+The current implementation uses transparent priority ranking plus Pareto
+retention. The Method Graph Agent decides how many new nodes are useful for the
+current question; the program removes duplicate nodes, attaches relations,
+calculates priorities, and keeps unselected nodes available for later visits.
 
-The search-policy interface accepts richer policies later without changing the artifact format:
+There is no task-level breadth/depth switch. A later search policy can be added
+without changing the artifact format:
 
 | Policy | Suitable situation | What it adds |
 |---|---|---|
@@ -623,7 +687,7 @@ The comparison report will use final task performance, time to first valid resul
 | Layer | MethodTrail implementation | Why it matters |
 |---|---|---|
 | Language and packaging | Python 3.11+, typed dataclasses/Pydantic schemas, `uv` or pip environment files | reproducible typed artifacts and service boundaries |
-| LLM integration | DashScope and OpenAI-compatible providers, structured outputs, retry/error handling | model-agnostic Coding and research roles |
+| LLM integration | OpenAI-compatible provider, structured outputs, retry/error handling | model-agnostic Coding and research roles |
 | Repository understanding | `ripgrep`, AST or tree-sitter symbol index, import graph, test map | repo-level code retrieval and targeted editing |
 | Code quality | ruff, pyright, pytest, adapter-provided smoke tests | separate technical correctness from LLM self-assessment |
 | Workspace isolation | per-run worktree/copy workspace; optional Docker runtime | safe code mutation and parallel-safe provenance |

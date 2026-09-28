@@ -44,8 +44,7 @@ conda run -n nlphw python run_graph_evolve.py `
   --base-url https://yuzapi.fun/v1 `
   --budget-seconds 2400 `
   --max-iterations 12 `
-  --search-policy balanced `
-  --max-repair-attempts 4
+  --max-repair-steps 100
 ```
 
 The run records each code change, private score, runtime, failure and graph
@@ -68,9 +67,7 @@ evidence that the harness itself beats a fixed word+character predictor; it is
 evidence that the run discovered and validated that representation. A stronger
 harness comparison needs matched no-agent and multi-seed runs.
 
-Three later proposals failed during code-edit or execution recovery and were
-kept as failure evidence. The accepted code and prediction file are copied to
-`accepted/`. These numbers are a single-task local measurement, not an official
-MLE-bench Lite aggregate score; the API model, hardware and five-iteration
-budget are part of the original run. New runs use a twelve-iteration default,
-four repair attempts, and a configurable search policy.
+The project keeps technical repair steps separate from research rounds. A
+repair step can continue, switch implementation, or abandon the candidate;
+`100` is only a safety cap and is not a research-round budget. These numbers are
+a single-task local measurement, not an official MLE-bench Lite aggregate score.

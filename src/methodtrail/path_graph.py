@@ -33,6 +33,12 @@ class ExperimentPathGraph:
     def add_node(self, node: PathNode) -> None:
         data = node.model_dump(mode="json")
         data["node_type"] = "outcome"
+        data["method_signature"] = _descriptor_signature(
+            node.method,
+            node.mutation_class.value,
+            node.relation,
+            node.question,
+        )
         self.graph.add_node(node.variant_id, **data)
         if node.parent_variant_id:
             self.graph.add_edge(
@@ -72,6 +78,17 @@ class ExperimentPathGraph:
             relation = self._infer_relation(parent.get("method"), original)
             change = original.model_copy(update={"relation": relation})
             proposal_id = f"proposal-{iteration}-{index}-{uuid.uuid4().hex[:8]}"
+            signature = method_signature(change)
+            # A method node is global to the project.  Do not create a second
+            # executable node for an identical method; the existing node stays
+            # available as history and can be revisited when new evidence
+            # changes its priority.
+            if any(
+                data.get("method_signature") == signature
+                and data.get("node_type") in {"proposal", "outcome"}
+                for _, data in self.graph.nodes(data=True)
+            ):
+                continue
             self.graph.add_node(
                 proposal_id,
                 node_type="proposal",
@@ -86,6 +103,8 @@ class ExperimentPathGraph:
                 estimated_seconds=change.estimated_seconds,
                 failure_risk=change.failure_risk,
                 status="proposed",
+                method_signature=signature,
+                change_request=change.model_dump(mode="json"),
             )
             if parent_variant_id:
                 self.graph.add_edge(
@@ -98,6 +117,50 @@ class ExperimentPathGraph:
             attached.append((proposal_id, change))
         self._save()
         return attached
+
+    def method_pool(self, limit: int = 100) -> list[dict[str, Any]]:
+        """Return the project-wide method pool, including measured failures."""
+
+        rows = []
+        for node_id, data in self.graph.nodes(data=True):
+            if data.get("node_type") not in {"proposal", "outcome"}:
+                continue
+            row = dict(data)
+            row["node_id"] = node_id
+            rows.append(row)
+        return rows[-limit:]
+
+    def candidate_frontier(self, limit: int = 50) -> list[dict[str, Any]]:
+        """Return proposed/deferred nodes that remain eligible for revisiting."""
+
+        eligible = {
+            "proposed",
+            "ranked",
+            "deferred_outcome",
+            "needs_evidence_outcome",
+            "promising_outcome",
+        }
+        return [
+            row
+            for row in self.method_pool(limit=limit)
+            if row.get("node_type") == "proposal" and row.get("status") in eligible
+        ]
+
+    def frontier_changes(self, limit: int = 50) -> list[tuple[str, ChangeRequestArtifact]]:
+        """Rehydrate unexecuted method nodes for a later path comparison."""
+
+        result: list[tuple[str, ChangeRequestArtifact]] = []
+        for row in self.candidate_frontier(limit=limit):
+            raw_change = row.get("change_request")
+            if not raw_change:
+                continue
+            parent_ids = list(self.graph.predecessors(str(row["node_id"])))
+            parent_id = parent_ids[0] if parent_ids else None
+            change = ChangeRequestArtifact.model_validate(raw_change).model_copy(
+                update={"parent_variant_id": parent_id}
+            )
+            result.append((str(row["node_id"]), change))
+        return result
 
     def set_proposal_priority(self, proposal_id: str, priority: float) -> None:
         if proposal_id in self.graph:
@@ -374,7 +437,7 @@ class ExperimentPathGraph:
         data = self.graph.nodes[node_id]
         haystack = json.dumps(data, ensure_ascii=False).lower()
         overlap = sum(token in haystack for token in _tokens(query))
-        status_bonus = 0.5 if data.get("status") in {"adopted", "adopted_outcome", "deferred_outcome"} else 0.0
+        status_bonus = 0.5 if data.get("status") in {"adopted", "adopted_outcome", "promising_outcome", "deferred_outcome"} else 0.0
         return float(overlap) + status_bonus - 0.25 * distance
 
     def _row(self, node_id: str, role: str, distance: int) -> dict[str, Any]:
@@ -404,6 +467,36 @@ class ExperimentPathGraph:
     def _load(self) -> None:
         data = json.loads(self.path.read_text(encoding="utf-8"))
         self.graph = nx.node_link_graph(data, edges="edges", directed=True)
+
+def method_signature(change: ChangeRequestArtifact) -> str:
+    """Stable, task-local identity for a proposed method.
+
+    Titles and prose are intentionally excluded.  Two methods that change the
+    same family/components/factors represent one method node even when the LLM
+    describes them with different wording.
+    """
+
+    return _descriptor_signature(
+        change.method,
+        change.mutation_class.value,
+        change.relation,
+        change.research_question,
+    )
+
+
+def _descriptor_signature(
+    method: MethodDescriptor, mutation_class: str, relation: str, question: str
+) -> str:
+    payload = {
+        "family": method.family,
+        "components": method.components,
+        "changed_factors": sorted(method.changed_factors),
+        "target_scope": method.target_scope,
+        "mutation_class": mutation_class,
+        "relation": relation,
+        "research_question": question.strip().lower(),
+    }
+    return json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
 
 
 def _tokens(text: str) -> list[str]:

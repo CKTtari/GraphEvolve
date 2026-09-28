@@ -53,11 +53,18 @@ class TaskContract(BaseModel):
     maximize_metric: bool = True
     allow_self_reported_metric: bool = False
     timeout_seconds: int = Field(default=1800, ge=1)
-    max_repair_attempts: int = Field(default=4, ge=0, le=8)
+    # Repair is an internal technical loop.  It must not be confused with the
+    # number of research rounds.  The large safety cap prevents a broken
+    # adapter from spinning forever; RecoveryAgent can stop much earlier.
+    max_repair_steps: int = Field(default=100, ge=1, le=1000)
+    # Kept only so older task contracts can still be loaded.  Runtime code does
+    # not use it as the research-round budget.
+    max_repair_attempts: int | None = Field(default=None, ge=0, le=1000)
     minimum_iterations: int = Field(default=1, ge=1)
+    # Deprecated compatibility fields.  Current runtime selection is derived
+    # from the method graph and measured evidence; these values are ignored.
     search_policy: Literal["breadth", "balanced", "depth"] = "balanced"
-    exploration_rounds: int = Field(default=3, ge=0, le=50)
-    proposal_count: int = Field(default=5, ge=1, le=5)
+    exploration_rounds: int = Field(default=0, ge=0, le=50)
     allowed_dependencies: list[str] = Field(default_factory=list)
     editable_paths: list[str] = Field(default_factory=list)
     protected_paths: list[str] = Field(default_factory=lambda: ["task_contract.json"])
@@ -73,7 +80,14 @@ class TaskContract(BaseModel):
         """Task facts the research roles may see; never disclose private paths."""
 
         return self.model_dump(
-            exclude={"private_evaluator_dir", "private_evaluation_command"}
+            exclude={
+                "private_evaluator_dir",
+                "private_evaluation_command",
+                "max_repair_steps",
+                "max_repair_attempts",
+                "search_policy",
+                "exploration_rounds",
+            }
         )
 
 
@@ -82,12 +96,17 @@ class ResearchState(BaseModel):
     iteration: int
     remaining_seconds: int
     best_metric: float | None = None
+    incumbent_metric: float | None = None
+    incumbent_variant_id: str | None = None
+    research_round: int = 0
+    repair_step: int = 0
     recent_facts: list[str] = Field(default_factory=list)
     unresolved_questions: list[str] = Field(default_factory=list)
     graph_context: list[dict[str, Any]] = Field(default_factory=list)
     path_hints: list[dict[str, Any]] = Field(default_factory=list)
     portfolio_context: list[dict[str, Any]] = Field(default_factory=list)
     memory_context: list[dict[str, Any]] = Field(default_factory=list)
+    method_pool: list[dict[str, Any]] = Field(default_factory=list)
 
 
 class HypothesisArtifact(BaseModel):
@@ -116,9 +135,16 @@ class ChangeRequestArtifact(BaseModel):
 
 
 class CandidateProposalArtifact(BaseModel):
-    """Several executable alternatives before the program applies path-value ranking."""
+    """A dynamically sized batch of executable method nodes.
 
-    candidates: list[ChangeRequestArtifact] = Field(min_length=1, max_length=5)
+    The system deliberately does not prescribe a fixed number of candidates.
+    The LLM can stop discovery when the method graph has enough relevant
+    alternatives for the current question.
+    """
+
+    candidates: list[ChangeRequestArtifact] = Field(min_length=1)
+    discovery_complete: bool = False
+    discovery_reason: str = ""
 
 
 class CandidateSelectionArtifact(BaseModel):
@@ -192,6 +218,7 @@ class RecoveryArtifact(BaseModel):
     repair_directions: list[str]
     preserve_question: bool
     return_to_reflection_reason: str
+    action: Literal["continue_repair", "switch_implementation", "abandon_candidate"] = "continue_repair"
 
 
 class PathNode(BaseModel):
@@ -206,7 +233,14 @@ class PathNode(BaseModel):
     metric: float | None = None
     wall_seconds: float | None = None
     failure_risk: float = 0.0
-    status: Literal["adopted", "deferred", "needs_evidence", "failed"]
+    status: Literal[
+        "adopted",
+        "promising",
+        "deferred",
+        "needs_evidence",
+        "failed",
+        "abandoned",
+    ]
     method: MethodDescriptor = Field(default_factory=MethodDescriptor)
 
 
@@ -231,7 +265,7 @@ class ValueWeights(BaseModel):
     @classmethod
     def for_search_policy(
         cls, policy: str, iteration: int, exploration_rounds: int
-    ) -> "ValueWeights":
+    ) -> ValueWeights:
         """Choose how strongly the ranker values information versus direct gain.
 
         ``breadth`` spends early iterations distinguishing alternatives,

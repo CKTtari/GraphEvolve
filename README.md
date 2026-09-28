@@ -6,16 +6,17 @@ It is aimed at problems with a runnable evaluator but no fixed solution: model s
 
 ## Research loop
 
-Each iteration follows one main path:
+Each research round follows one main path:
 
-    Task -> Choose -> Code -> Execute -> Record -> Assess
+    Task -> Question -> Method graph -> Code -> Execute -> Record -> Assess
 
-Four focused roles handle the situations that need extra work.
+The controller keeps research decisions separate from technical execution.
 
-- Reflection turns the current observation into a testable question and an adoption condition.
-- Evidence turns unclear or conflicting results into an ablation, comparison, or segmented check.
-- Recovery reads execution failures and asks the coding role to repair the implementation.
-- Memory writes measured conclusions, applicable conditions, and variant relations for later retrieval.
+- Question mode `new_question` turns the current observation into a testable question.
+- Question mode `conflict_refinement` turns valid but unclear results into an ablation, comparison, or segmented check.
+- Method Graph expands the project-wide method pool, connects new nodes to related history, and selects one path.
+- Assessment-Memory records valid evidence and updates node status and path priority.
+- Repair handles technical failures inside the same research round and never changes the research question by itself.
 
 The LLM proposes experiments and edits. GraphEvolve ranks candidate paths, applies permitted edits, runs commands, reads evaluator output, and manages versions. The evaluator supplies the metric used to keep or reject a candidate.
 
@@ -33,19 +34,21 @@ The graph is stored as readable JSON and the concise experiment memory as JSONL.
 
 Candidate estimates begin with the LLM's expected gain, information value, runtime, and failure risk. Once related paths have measured outcomes, GraphEvolve blends those observations back into the estimates before ranking the next branch. Evaluators may also declare auxiliary metrics and minimum metric constraints; a candidate that misses a declared constraint cannot be adopted on the primary score alone.
 
-### Search policy
+### Dynamic method pool
 
-The task contract controls how the limited experiment turns are spent:
+The method pool starts empty for a new project. The task contract provides data,
+interfaces, metric, permitted dependencies, and resource limits; it does not
+provide a predictor or a fixed candidate list. The Method Graph Agent may add
+any number of distinct nodes and may stop discovery when the current question
+has enough relevant alternatives.
 
-- `breadth` gives information gain the highest weight and keeps several distinct
-  method families in the candidate pool;
-- `depth` favors extending and tuning a direction that already has support;
-- `balanced` explores for `exploration_rounds`, then shifts toward direct gain and
-  lower-risk refinement.
-
-The policy changes candidate priorities and the proposal prompt. It does not
-silently run candidates in parallel: one selected experiment still runs at a
-time, and every candidate remains in the graph for later comparison.
+Each node stores its implementation description, changed factors, parent
+relations, measured results, conditions, cost, and failure history. Duplicate
+method descriptions are attached to the existing node instead of creating a
+new branch. The path priority uses the declared experiment value and measured
+runtime/risk; there is no hidden breadth/depth phase switch. One selected
+experiment still runs at a time, and unselected nodes remain in the project
+method pool.
 
 ## Editing and safety
 
@@ -81,7 +84,9 @@ Pass the variable name, model, and endpoint when starting a run:
 
     conda run -n methodtrail python -m methodtrail run --contract .\task_contract.json --project-root .\methodtrail_state --project-id demo-project --model your-model-name --api-key-env LLM_API_KEY --base-url https://your-openai-compatible-endpoint/v1 --remaining-seconds 3600 --max-iterations 12
 
-The default key variable is DASHSCOPE_API_KEY. Omit the endpoint argument when the default provider endpoint is appropriate.
+The CLI default is `DASHSCOPE_API_KEY` for backward compatibility; the
+benchmark and examples can use `LLM_API_KEY` explicitly. The endpoint and
+model are launch-time settings.
 
 ## Create a task
 
@@ -102,11 +107,8 @@ A task starts with a JSON contract. It declares public input files, editable sou
       "metric_name": "accuracy",
       "maximize_metric": true,
       "timeout_seconds": 900,
-      "max_repair_attempts": 4,
+      "max_repair_steps": 100,
       "minimum_iterations": 3,
-      "search_policy": "balanced",
-      "exploration_rounds": 3,
-      "proposal_count": 5,
       "allowed_dependencies": ["numpy", "pandas", "scikit-learn"],
       "protected_paths": ["task_contract.json", "metrics.json"]
     }

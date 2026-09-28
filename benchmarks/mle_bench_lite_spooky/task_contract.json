@@ -1,0 +1,20 @@
+{
+  "task_id": "mle-bench-lite-spooky-author-identification",
+  "description": "Write solution.py to train a text classifier from train.csv and produce probability predictions.csv for test.csv. An independent evaluator computes MLE-bench's multi-class log loss.",
+  "workspace_template": "./task",
+  "allowed_data_paths": ["train.csv", "test.csv", "sample_submission.csv"],
+  "solution_entrypoint": "solution.py",
+  "run_command": ["python", "solution.py"],
+  "private_evaluator_dir": "./private_evaluator",
+  "private_evaluation_command": ["python", "evaluate.py"],
+  "metric_file": "metrics.json",
+  "required_outputs": ["predictions.csv"],
+  "metric_name": "multi_class_log_loss",
+  "maximize_metric": false,
+  "timeout_seconds": 300,
+  "max_repair_steps": 100,
+  "minimum_iterations": 3,
+  "allowed_dependencies": ["numpy", "pandas", "scikit-learn"],
+  "editable_paths": ["solution.py"],
+  "protected_paths": ["train.csv", "test.csv", "sample_submission.csv", "metrics.json"]
+}

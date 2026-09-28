@@ -52,15 +52,20 @@ class ChooseAgent:
         hypothesis: HypothesisArtifact,
     ) -> CandidateProposalArtifact:
         user = _context(
-            f"""Propose exactly {contract.proposal_count} distinct next experiments. Each must be executable and tied to the current
-hypothesis and one graph-expansion hint. Separate configuration-only changes from composition, implementation,
-and recovery changes. For every candidate fill method.family, method.components, method.changed_factors, and
-method.target_scope so the program can compare it with the active path. Give realistic expected gain, information
-gain, runtime and failure-risk estimates. The program will attach these as proposed graph branches and rank them
-before one is selected. Do not propose a disconnected change when an existing path can be deepened, ablated,
-combined, or repaired. Follow the task's search_policy: breadth keeps distinct
-families and controls alive; depth prefers a supported direction's composition
-and tuning; balanced explores first and then deepens the strongest path.""",
+            """Expand the project method graph with one or more new, executable method nodes.
+There is no fixed candidate count. Return only methods that add a distinct
+implementation, configuration, composition, or recovery possibility. Stop when
+the current question has enough relevant alternatives, and explain why in
+discovery_complete/discovery_reason. Do not repeat a method already present in
+the supplied graph context. Each candidate must be tied to the current
+hypothesis and one graph relation. Separate configuration-only changes from
+composition, implementation, and recovery changes. For every candidate fill
+method.family, method.components, method.changed_factors, and method.target_scope
+so the program can compare it with related nodes. Give conservative estimates
+grounded in the supplied history. The program will attach each node, compute a
+path priority, and keep unselected nodes in the method pool. The current task
+may start with an empty method graph, so derive the first methods from the task
+and data contract rather than assuming a supplied predictor.""",
             contract=contract,
             state=state,
             hypothesis=hypothesis,
@@ -164,9 +169,11 @@ class RecoveryAgent:
         self, contract: TaskContract, state: ResearchState, run: RunArtifact
     ) -> RecoveryArtifact:
         user = _context(
-            """Classify the technical failure. Suggest parameter repair, lower-cost implementation,
-neighbor-path replacement, or a reason the research question must be revised. Do not pretend that a failed run
-is evidence against the hypothesis.""",
+            """Classify only the technical failure. Keep the research question and
+the selected method target unchanged. Decide whether to continue repairing the
+same candidate, switch to a nearby implementation that tests the same question,
+or abandon this candidate. Return one concrete next repair action and never
+claim that a code or environment failure disproves the research hypothesis.""",
             contract=contract,
             state=state,
             run=run,
@@ -186,11 +193,14 @@ class AssessAgent:
         run: RunArtifact,
     ) -> AssessmentArtifact:
         user = _context(
-            """Assess the measured run. Adopt only when the available evidence supports it and all declared
-metric constraints pass. Use the auxiliary metrics to judge stability, cost, and output quality when present.
-Choose 'evidence'
-when the next step should isolate uncertainty, 'recovery' only for technical failure, 'defer' for a useful but
-unadopted result, and 'stop' when remaining budget cannot support a useful next run.""",
+            """Assess a successfully measured run. Compare it with the project-wide
+incumbent and the relevant parent, while also considering information value and
+future path potential. Adopt only when the measured primary metric improves the
+incumbent and all declared constraints pass. A worse but informative or
+promising result should remain in the method graph as evidence or deferred
+work; it must not replace the incumbent. Choose 'evidence' when the next step
+should isolate uncertainty, 'defer' for a promising but currently inferior
+result, and 'stop' only when no useful executable path remains.""",
             contract=contract,
             state=state,
             change=change,
@@ -239,3 +249,24 @@ def _context(instruction: str, **payload: Any) -> str:
     return (
         f"{instruction}\n\nContext:\n{json.dumps(packed, ensure_ascii=False, indent=2)}"
     )
+
+
+# Names used by the design document.  The aliases keep older integrations
+# import-compatible while the orchestrator can describe the roles accurately.
+QuestionAgent = ReflectionAgent
+MethodGraphAgent = ChooseAgent
+RepairAgent = RecoveryAgent
+
+
+class AssessmentMemoryAgent:
+    """The valid-run reviewer and memory writer share one evidence contract."""
+
+    def __init__(self, llm: StructuredLLM) -> None:
+        self.assess_agent = AssessAgent(llm)
+        self.memory_agent = MemoryAgent(llm)
+
+    def assess(self, *args: Any, **kwargs: Any) -> AssessmentArtifact:
+        return self.assess_agent.assess(*args, **kwargs)
+
+    def summarize(self, *args: Any, **kwargs: Any) -> AssessmentArtifact:
+        return self.memory_agent.summarize(*args, **kwargs)
