@@ -176,6 +176,53 @@ def _compact_candidate(value: Any) -> dict[str, Any]:
     return result
 
 
+def _compact_plan(value: Any) -> dict[str, Any]:
+    if not isinstance(value, dict):
+        return {"value": _short(value, 1200)}
+    result = {
+        key: _short(value.get(key), 1600)
+        for key in ("summary", "expected_test", "affected_interfaces", "invariant_checks")
+        if value.get(key) not in (None, "", [], {})
+    }
+    edits = value.get("edits") or []
+    result["edits"] = []
+    for edit in edits[:8]:
+        if not isinstance(edit, dict):
+            result["edits"].append(_short(edit, 1000))
+            continue
+        result["edits"].append(
+            {
+                key: _short(edit.get(key), 9000 if key in {"old_text", "new_text"} else 420)
+                for key in ("operation", "path", "symbol", "purpose", "old_text", "new_text")
+                if edit.get(key) is not None
+            }
+        )
+    return result
+
+
+def _compact_run(value: Any) -> dict[str, Any]:
+    if not isinstance(value, dict):
+        return {"value": _short(value, 1200)}
+    return {
+        key: _short(value.get(key), 7000 if "stdout" in key or "stderr" in key else 700)
+        for key in (
+            "command",
+            "return_code",
+            "timed_out",
+            "wall_seconds",
+            "metric",
+            "metrics",
+            "metric_constraints_passed",
+            "stdout",
+            "stderr",
+            "evaluation_stdout",
+            "evaluation_stderr",
+            "output_files",
+        )
+        if value.get(key) not in (None, "", [], {})
+    }
+
+
 def _compact_state(value: Any) -> dict[str, Any]:
     state = value if isinstance(value, dict) else {}
     result = {
@@ -252,6 +299,32 @@ def _compact_payload(key: str, value: Any) -> Any:
         value = value.model_dump(mode="json")
     if key == "state":
         return _compact_state(value)
+    if key in {"plan", "code_plan"}:
+        return _compact_plan(value)
+    if key in {"run", "recovery", "implementation_review"}:
+        if key == "run":
+            return _compact_run(value)
+        if isinstance(value, dict):
+            return {
+                name: _short(item, 1800) if isinstance(item, str) else item
+                for name, item in value.items()
+                if name in {
+                    "failure_class",
+                    "diagnosis",
+                    "repair_directions",
+                    "preserve_question",
+                    "return_to_reflection_reason",
+                    "action",
+                    "passed",
+                    "scope_ok",
+                    "invariants_ok",
+                    "summary",
+                    "checks",
+                    "issues",
+                }
+            }
+    if key in {"actual_diff", "diff"}:
+        return _short(value, 18_000)
     if key in {"ranked_candidates", "candidates"} and isinstance(value, list):
         return [_compact_candidate(item) for item in value[:40]]
     if key in {"repository_context", "repo_context"} and isinstance(value, list):
@@ -728,13 +801,27 @@ def _context(
             "state",
             "change",
             "hypothesis",
+            "plan",
+            "actual_diff",
+            "repository_context",
+            "repo_context",
             "run",
             "recovery",
             "ranked_candidates",
             "candidates",
         ):
             if key in packed:
-                compact[key] = packed[key]
+                value = packed[key]
+                if key in {"repository_context", "repo_context"} and isinstance(value, list):
+                    value = [
+                        {
+                            "path": item.get("path", ""),
+                            "content": _short(item.get("content", ""), 1800),
+                        }
+                        for item in value[:8]
+                        if isinstance(item, dict)
+                    ]
+                compact[key] = value
         compact["context_notice"] = (
             "Older graph/source details were compacted after reaching the prompt limit; "
             "use the supplied IDs and current repository files for the next decision."
