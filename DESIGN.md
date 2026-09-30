@@ -10,7 +10,7 @@ The project name is **GraphEvolve: a graph-guided autonomous experiment system**
 - **Trail** is the evidence trail showing how one experiment led to the next.
 
 The system follows a serial research process, a project-wide method graph, a
-separate technical repair loop, and value-aware path choice. It is not tied to
+separate memory graph, a technical repair loop, and value-aware path choice. It is not tied to
 one model family or benchmark.
 
 ## 1. Goal
@@ -56,7 +56,7 @@ MethodTrail does not start from a supplied predictive model. A task adapter supp
 | Task | Assemble the current question, budget, relevant graph subgraph, global method pool, existing best result, and unresolved evidence | `ResearchState` |
 | Question | Form or refine one measurable question from the task and valid evidence | `HypothesisArtifact` |
 | Method graph | Add new method nodes, relate them to existing nodes, score paths, and select one executable experiment | `ExperimentSpecArtifact` |
-| Code | Read the selected change request, write or patch the predictor workspace, then run interface and smoke checks | `ImplementationArtifact` |
+| Code | Read the selected change request, write or patch the predictor workspace, review the applied diff against the hypothesis, then run interface and smoke checks | `ImplementationArtifact` + `ImplementationReviewArtifact` |
 | Execute | Materialize source and configuration in an isolated workspace, then train and evaluate | `RunArtifact` |
 | Record | Save actual source revision, config, metrics, runtime, resources, logs, and prediction files | persistent run record |
 | Assess | Judge evidence, then adopt, investigate, recover, send for allowed external evaluation, or stop | `DecisionArtifact` |
@@ -79,9 +79,25 @@ The controller is the only owner of runtime state. Question formation, method se
 
 The Coding Agent is the implementation worker inside the main research process. It receives a selected experiment specification, the current code lineage, the task contract, relevant graph evidence, and any Recovery notes. It writes the first baseline implementation when no parent predictor exists; in later rounds it makes a narrowly scoped change that matches the selected experiment path.
 
+The edit protocol is enforced by the workspace, not only requested in the
+prompt. A root candidate may create the missing entrypoint. A child candidate
+or any recovery step must use a unique `replace` or one-symbol
+`replace_symbol` edit; whole-entrypoint `rewrite` operations are rejected for
+those steps. This keeps local modification an executable invariant rather than
+an LLM intention.
+
 Its internal loop is:
 
-`inspect relevant artifacts → plan the code change → write a patch or new source file → run syntax/interface checks → smoke execute → return a runnable implementation or a recovery request`.
+`inspect relevant artifacts → plan the code change → apply a constrained patch → independent implementation review → syntax/interface checks → smoke execute → return a runnable implementation or a recovery request`.
+
+The review is a separate typed agent transition, even when it uses the same
+provider. It sees the realized diff rather than the proposed plan and checks
+the selected research question, declared invariants, comparison target, and
+output interface. A rejected patch enters the technical repair loop and does
+not become a measured research result or consume a research round. This gate
+complements the deterministic verifier: the verifier can prove syntax,
+dependencies, and required output paths, while the review checks whether the
+implementation still means what the hypothesis says.
 
 The Coding Agent has no authority to choose the research objective. Reflection and Choose define what should be tested; the Coding Agent decides how to express that test in executable code.
 
@@ -95,12 +111,13 @@ Artifacts are immutable records. A changed configuration or code revision become
 | `HypothesisArtifact` | observation, hypothesis, evidence needed, adoption/fallback conditions | states what a candidate should establish |
 | ChangeRequestArtifact | mutation class, allowed files, required invariants, comparison target | separates a parameter trial from a code change before implementation begins |
 | CodePlanArtifact | intended source changes, affected interfaces, expected test result | lets the Coding Agent explain an implementation plan before editing |
+| `ImplementationReviewArtifact` | applied diff, invariant checks, scope result, concrete issues | blocks a semantically unrelated or hypothesis-breaking patch before execution |
 | `ImplementationArtifact` | source snapshot, patch, entrypoint, dependency profile | identifies runnable model and feature code |
 | `ConfigArtifact` | model family, feature switches, hyperparameters, seed, validation plan | gives exact settings |
 | `ExperimentSpecArtifact` | parent graph nodes, planned changes, implementation/config refs, evidence plan | represents a selectable candidate path |
 | `RunArtifact` | command, timestamps, metrics, runtime, resources, logs, outputs | records execution facts |
 | `EvidenceArtifact` | comparisons, subgroup results, consistency assessment, unanswered questions | interprets the run |
-| `RecoveryArtifact` | failure class, diagnosis, attempted repair, result | stores technical lessons |
+| `RecoveryArtifact` | failure class, diagnosis, attempted repair, result | drives the current technical repair step; durable repair records live in `memory/bugs.jsonl` |
 | `DecisionArtifact` | candidate priorities, selected path, LLM rationale, adoption outcome | explains choice |
 | `PathNodeArtifact` | reusable conclusion, conditions, lineage, linked runs | becomes a path-graph node |
 | `ExternalFeedbackArtifact` | evaluator reference and returned permitted metrics | captures external feedback |
@@ -121,9 +138,9 @@ MethodTrail separates a research project from its individual sessions and code v
 - A **session** records one continuous research attempt. It has a JSONL trajectory and a short handoff file for pause and resume.
 - A **candidate** is a Git branch and worktree created from the current accepted revision or an adopted parent variant.
 - A **run** is the measured execution performed inside that candidate worktree.
-- A **memory card** stores a reusable conclusion in append-only JSONL, while the experiment-path graph stores relations among versions.
+- A **memory card** stores a reusable conclusion in append-only JSONL. A separate memory graph links cards by parent variant, method family, changed factors, and related tags; the experiment-path graph stores executable method relations.
 
-The Git commits, candidate metadata, session handoff, trajectory JSONL, and memory cards are the replayable sources of truth. SQLite artifacts remain useful as a local audit/index layer, but the system can still inspect a project without querying a database.
+The Git commits, candidate metadata, session handoff, trajectory JSONL, memory cards, and memory graph are the replayable sources of truth. SQLite artifacts remain useful as a local audit/index layer, but the system can still inspect a project without querying a database.
 
 Pause writes the latest accepted version, metric, next question, workspace, and artifact references into `handoff.md`. Resume reopens the session and starts the next candidate from the project’s accepted revision. Rollback moves the project’s accepted-version pointer to any earlier adopted candidate; it does not erase later exploratory evidence.
 
@@ -157,18 +174,29 @@ A chronological list records what happened. The path graph also records how meth
 - a useful component can feed several later combinations;
 - retrieval starts at the current question and follows relevant parents, siblings, and neighbors rather than consuming unrelated old logs.
 
-NetworkX provides in-memory subgraph retrieval, path expansion, ranking, and visualization. The graph JSON and append-only memory cards are readable outside the runtime; SQLite holds the generic artifact audit trail.
+NetworkX provides in-memory subgraph retrieval, path expansion, ranking, and visualization. The method graph JSON, memory graph JSON, and append-only memory cards are readable outside the runtime; SQLite holds the generic artifact audit trail.
 
 ### Implemented path mechanics
 
 The executable system uses four concrete steps rather than treating the graph as a visual record:
 
 1. **Describe a method.** Each candidate carries its method family, component map, changed factors, and target scope. This gives the graph a machine-readable basis for comparing two experiments.
-2. **Attach branches before selection.** Candidate proposals are written as proposed children of the active version before ranking. The runtime normalizes their relation where the component description makes it clear, for example recognizing a one-factor same-family change as a deepening branch or an explicit removal as an ablation.
+2. **Attach branches before selection.** Candidate proposals are written as proposed children of the active version before ranking. The Method Graph Agent owns the semantic relation (`deepen`, `ablate`, `combine`, `explore`, or `recover`). The runtime validates the component map and stores a visible warning when it conflicts with that declaration; it never silently changes the research question. A proposal can also list multiple `evidence_parent_ids`, which become directed `informed_by` edges distinct from the single code-parent lineage edge.
 3. **Retrieve a directed evidence pack.** The next iteration receives path history, matched alternatives from the same parent, and a candidate frontier of unselected or deferred branches. It does not flatten the graph into an undirected recent-history list.
 4. **Write back outcomes.** Adopted, deferred, evidence-seeking, and failed executions all retain their measured facts and relation to the proposed branch. Raw measurements remain distinct from the Memory Agent's reusable conclusion and applicable conditions.
 
-Path priority starts from the LLM's estimates, then applies a bounded historical correction. Comparable outcomes contribute observed gain, wall time, and failure rate; the correction is blended with, rather than substituted for, the LLM prior. Task contracts can expose auxiliary metrics and minimum metric constraints, so a higher primary score cannot bypass a failed correctness or reliability requirement.
+The memory graph then links the new conclusion to related cards. Its parent and
+semantic edges are directed and sparse: retrieval walks incoming provenance
+edges to older conclusions before considering outgoing later branches. The
+returned memory record includes the traversed relation, reason, and target
+change, so the Agent sees why a card was reached. This profile is supplied to
+the next proposal step, so memory changes candidate generation rather than
+merely increasing the size of the prompt. A proposal can name an existing
+ancestor outcome as `parent_variant_id`; the orchestrator validates that ID and
+creates the new workspace from that ancestor, making directed backtracking an
+explicit experiment operation.
+
+Path priority starts from the LLM's estimates, then applies a bounded historical correction. Comparable outcomes contribute observed gain, wall time, and failure rate; the correction is blended with, rather than substituted for, the LLM prior. A method family with no measured outcome receives a small information preference. A family with repeated non-improving outcomes is down-weighted without being deleted, so a genuinely new factor can still be revisited. After repeated non-improvement, candidates that only repeat the recent changed factors receive an additional saturation penalty; an explicit composition or orthogonal factor remains eligible and receives information value even before it has a positive result. Candidates that cannot fit the remaining runtime plus the finalization reserve are excluded before the LLM chooses. Task contracts can expose auxiliary metrics and minimum metric constraints, so a higher primary score cannot bypass a failed correctness or reliability requirement.
 
 ## 7. Candidate generation and selection
 
@@ -196,6 +224,14 @@ Candidates come from four sources:
    research question.
 
 Free-form suggestions are never executed directly. Every candidate becomes a ChangeRequest Artifact and then an implementation plan or controlled patch that passes workspace checks.
+
+At the initial discovery boundary, if the proposal batch contains multiple
+distinct method families or components but no composition candidate, the
+controller performs one bounded proposal revision with an explicit coverage
+warning. This is a generic search-space check, not a benchmark-specific
+predictor. Later rounds keep an orthogonal or composition challenger in the
+frontier when recent candidates share factors and fail to improve, so a local
+calibration or inference tweak cannot silently become the whole search space.
 
 ### Candidate specification
 
@@ -302,7 +338,7 @@ Code changes are evaluated in increasing-cost order:
 5. full task execution;
 6. task-declared independent evaluation command.
 
-At each layer, the executor writes observations back to the active Run Artifact. A failure before full training is still evidence for Recovery and later path-risk estimates.
+At each layer, the executor writes observations back to the active Run Artifact. A failure before full training is a technical signal for Recovery and path-risk estimates; it is not a measured research conclusion.
 
 ## 8. Question, Assessment, Recovery, and Memory
 
@@ -356,14 +392,22 @@ Agent explicitly abandons it.
 | Abandon candidate | record the technical cause and return to the method graph without changing the question |
 
 The LLM receives relevant source files, traceback, task interface, current
-hypothesis, and similar past repairs. It returns one of three actions:
+hypothesis, similar past repairs, and (for a semantic review failure) the
+typed `ImplementationReviewArtifact` with failed checks and concrete issues.
+The Repair Agent must answer that checklist with local edits before the patch
+is reviewed again. It must inspect the latest workspace after every applied patch;
+an earlier failed plan is not a source of truth for the next plan. It returns one
+of three actions:
 `continue_repair`, `switch_implementation`, or `abandon_candidate`. The
 controller allows a large technical-step safety cap (`max_repair_steps`,
-default 100) and lets the Repair Agent stop earlier. These steps do not count
+default 100). Repeated review failures alone never abandon a candidate;
+`abandon_candidate` must be an explicit Recovery Agent decision supported by a
+technical impossibility diagnosis. These steps do not count
 as research rounds. The executor runs syntax checks and an adapter smoke test
-before launching full training. Each repair step becomes a Recovery Artifact;
-only a successful run or an explicit abandonment returns control to method
-selection.
+before launching full training. Each repair step becomes a Recovery Artifact
+and a separate bug record; only a successful model run with a measured metric
+creates an experiment-memory conclusion and increments the research-round
+counter.
 
 ### Memory Agent
 
@@ -401,6 +445,8 @@ The current implementation creates an isolated Git worktree for every candidate:
 ├── wt/<short-variant-id>/      # candidate Git worktree
 ├── candidates/<variant-id>.json
 └── memory/
+    ├── cards.jsonl
+    └── bugs.jsonl
 ```
 
 Each candidate worktree contains:
@@ -466,7 +512,13 @@ same candidate; an abandoned repair returns to method selection. From Assess,
 the system can adopt and remember a result, keep a promising or incomplete
 branch for more evidence, expand the method graph, or stop.
 
-The current multi-round runner stops on an Agent `stop` decision, exhausted time budget, or its configured iteration limit. Automatic packaging of final deliverables is a later extension.
+The multi-round runner allows up to 20 completed research rounds by default. It
+also stops after four consecutive completed rounds fail to improve the current
+incumbent, in addition to an Agent `stop` decision or exhausted time budget.
+Technical repair attempts can repeat inside one round and do not consume the
+research-round count. The `dashboard` command writes an offline HTML view of
+the method graph, experiment-memory graph, round filter, directed edge labels,
+node/edge change details, and trajectory events.
 
 ### Current repository
 

@@ -17,12 +17,21 @@ from pydantic import BaseModel
 T = TypeVar("T", bound=BaseModel)
 
 
+class LLMDeadlineExceeded(RuntimeError):
+    """The shared research deadline expired before an LLM artifact was returned."""
+
+
 class StructuredLLM(Protocol):
     def complete(self, system: str, user: str, response_model: type[T]) -> T: ...
 
 
 class OpenAICompatibleLLM:
     """Uses an API key from the environment; never stores it in experiment artifacts."""
+
+    # The orchestrator uses this capability flag to add a pre-execution
+    # implementation review without forcing test doubles or lightweight local
+    # providers to implement another response type.
+    supports_implementation_review = True
 
     def __init__(
         self,
@@ -36,12 +45,18 @@ class OpenAICompatibleLLM:
             raise RuntimeError(f"missing API key in environment variable {api_key_env}")
         self.model = model
         self.log_path = Path(log_path) if log_path else None
+        self.deadline: float | None = None
         if self.log_path:
             self.log_path.parent.mkdir(parents=True, exist_ok=True)
         self.client = OpenAI(
             api_key=api_key,
             base_url=base_url or "https://dashscope.aliyuncs.com/compatible-mode/v1",
         )
+
+    def set_deadline(self, deadline: float | None) -> None:
+        """Set a monotonic deadline shared by planning and repair requests."""
+
+        self.deadline = deadline
 
     def complete(self, system: str, user: str, response_model: type[T]) -> T:
         """Request one typed artifact, retrying recoverable schema mistakes.
@@ -68,17 +83,54 @@ class OpenAICompatibleLLM:
             started = time.perf_counter()
             request_user = user + schema_prompt + correction
             try:
-                response = self.client.chat.completions.create(
-                    model=self.model,
-                    messages=[
+                request_kwargs = {
+                    "model": self.model,
+                    "messages": [
                         {"role": "system", "content": system},
                         {"role": "user", "content": request_user},
                     ],
-                    response_format={"type": "json_object"},
-                    temperature=0.2 if attempt == 0 else 0.0,
+                    "response_format": {"type": "json_object"},
+                    "temperature": 0.2 if attempt == 0 else 0.0,
+                }
+                if self.deadline is not None:
+                    remaining = self.deadline - time.monotonic()
+                    if remaining <= 0:
+                        raise TimeoutError("research budget exhausted before LLM request")
+                    request_kwargs["timeout"] = max(1.0, remaining)
+                response = self.client.chat.completions.create(
+                    **request_kwargs,
                 )
                 content = response.choices[0].message.content or "{}"
+            except LLMDeadlineExceeded:
+                self._log_call(
+                    call_id,
+                    response_model,
+                    system,
+                    request_user,
+                    None,
+                    started,
+                    error="LLMDeadlineExceeded: research budget exhausted",
+                )
+                raise
             except Exception as exc:  # API errors remain visible to recovery.
+                # The request timeout is set to the remaining research budget.
+                # If the gateway reports a timeout after that deadline, preserve
+                # the semantic budget signal instead of wrapping it as a generic
+                # API failure that can escape the research loop.
+                if self.deadline is not None and time.monotonic() >= self.deadline:
+                    deadline_error = LLMDeadlineExceeded(
+                        "research budget exhausted during LLM request"
+                    )
+                    self._log_call(
+                        call_id,
+                        response_model,
+                        system,
+                        request_user,
+                        None,
+                        started,
+                        error=f"LLMDeadlineExceeded: {deadline_error}",
+                    )
+                    raise deadline_error from exc
                 self._log_call(
                     call_id,
                     response_model,

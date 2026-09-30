@@ -47,6 +47,7 @@ class SessionRecord:
     updated_at: str
     current_variant_id: str | None = None
     next_question: str | None = None
+    consecutive_non_improving: int = 0
 
 
 @dataclass
@@ -322,6 +323,7 @@ class ProjectManager:
         status: str | None = None,
         current_variant_id: str | None = None,
         next_question: str | None = None,
+        consecutive_non_improving: int | None = None,
         handoff: str | None = None,
     ) -> SessionRecord:
         if status is not None:
@@ -330,6 +332,8 @@ class ProjectManager:
             session.current_variant_id = current_variant_id
         if next_question is not None:
             session.next_question = next_question
+        if consecutive_non_improving is not None:
+            session.consecutive_non_improving = consecutive_non_improving
         session.updated_at = _now()
         session_dir = self._session_dir(project, session.session_id)
         self._write_json(session_dir / "session.json", asdict(session))

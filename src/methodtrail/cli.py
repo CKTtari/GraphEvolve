@@ -55,7 +55,7 @@ def main() -> None:
     run.add_argument(
         "--max-iterations",
         type=int,
-        default=12,
+        default=20,
         help="maximum serial research turns; use 1 for a single turn",
     )
     run.add_argument("--parent-variant-id", default=None)
@@ -101,6 +101,14 @@ def main() -> None:
     )
     export.add_argument("--api-key-env", default="DASHSCOPE_API_KEY")
     export.add_argument("--base-url", default=None)
+
+    dashboard = commands.add_parser(
+        "dashboard", help="write an offline HTML view of method and memory graphs"
+    )
+    dashboard.add_argument("--project-root", required=True)
+    dashboard.add_argument("--project-id", required=True)
+    dashboard.add_argument("--session-id", required=True)
+    dashboard.add_argument("--output", required=True)
 
     args = parser.parse_args()
     if args.command == "repo-map":
@@ -152,6 +160,22 @@ def main() -> None:
         )
         return
 
+    if args.command == "dashboard":
+        trail = MethodTrail(
+            args.project_root,
+            llm=None,  # type: ignore[arg-type]  # dashboard export performs no LLM call.
+            project_id=args.project_id,
+            session_id=args.session_id,
+        )
+        print(
+            trail.export_dashboard(
+                args.output,
+                project_id=args.project_id,
+                session_id=args.session_id,
+            )
+        )
+        return
+
     llm = OpenAICompatibleLLM(
         model=args.model,
         api_key_env=args.api_key_env,
@@ -190,7 +214,12 @@ def main() -> None:
         json.dumps(
             {
                 "iteration": result.iteration,
-                "completed_iterations": len(results),
+                "completed_iterations": sum(
+                    result.completed_research for result in results
+                ),
+                "technical_attempts": sum(
+                    not result.completed_research for result in results
+                ),
                 "workspace": str(result.workspace),
                 "decision": result.assessment.decision
                 if result.assessment

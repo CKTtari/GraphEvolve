@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import ast
 import difflib
 import shutil
 import uuid
@@ -38,6 +39,8 @@ class WorkspaceManager:
         change: ChangeRequestArtifact,
     ) -> str:
         diffs: list[str] = []
+        original: dict[Path, str] = {}
+        staged: dict[Path, str] = {}
         for edit in plan.edits:
             target = self._safe_target(workspace, edit.path, contract)
             if change.allowed_files and edit.path not in change.allowed_files:
@@ -55,15 +58,18 @@ class WorkspaceManager:
                 raise PermissionError(
                     "configuration ChangeRequest cannot edit Python source; request implementation evolution instead"
                 )
-            old = target.read_text(encoding="utf-8") if target.exists() else ""
+            if target not in original:
+                original[target] = target.read_text(encoding="utf-8") if target.exists() else ""
+                staged[target] = original[target]
+            old = staged[target]
             if edit.operation == "create":
-                if target.exists():
+                if target.exists() or (target in staged and staged[target] != original[target]):
                     raise ValueError(
                         f"create edit requires a new file, but {edit.path} already exists"
                     )
                 new = edit.new_text
-            else:
-                if not target.exists():
+            elif edit.operation == "replace":
+                if not target.exists() and not staged[target]:
                     raise ValueError(
                         f"replace edit requires an existing file: {edit.path}"
                     )
@@ -78,19 +84,90 @@ class WorkspaceManager:
                         f"replace edit rewrites all of {edit.path}; return local edits instead"
                     )
                 new = old.replace(edit.old_text, edit.new_text, 1)
+            elif edit.operation == "replace_symbol":
+                if not target.exists() and not staged[target]:
+                    raise ValueError(f"replace_symbol edit requires an existing file: {edit.path}")
+                new = self._replace_symbol(old, edit.symbol or "", edit.new_text, edit.path)
+            else:  # rewrite
+                if edit.path != contract.solution_entrypoint:
+                    raise PermissionError("rewrite edits are limited to the solution entrypoint")
+                if change.parent_variant_id is not None or change.mutation_class.value == "recovery":
+                    raise ValueError(
+                        "rewrite is not allowed for a child or repair candidate; "
+                        "use a unique replace or replace_symbol edit for a local patch"
+                    )
+                if not target.exists() and not staged[target]:
+                    raise ValueError(f"rewrite edit requires an existing file: {edit.path}")
+                new = edit.new_text
+            staged[target] = new
+
+        for target, new in staged.items():
+            if target.suffix == ".py":
+                self._validate_python(new, target, contract)
+        for target, new in staged.items():
+            old = original[target]
             target.parent.mkdir(parents=True, exist_ok=True)
             target.write_text(new, encoding="utf-8")
+            rel = target.relative_to(workspace).as_posix()
             diffs.extend(
                 difflib.unified_diff(
                     old.splitlines(keepends=True),
                     new.splitlines(keepends=True),
-                    fromfile=f"a/{edit.path}",
-                    tofile=f"b/{edit.path}",
+                    fromfile=f"a/{rel}",
+                    tofile=f"b/{rel}",
                 )
             )
         diff = "".join(diffs)
         (workspace / ".methodtrail.diff").write_text(diff, encoding="utf-8")
         return diff
+
+    @staticmethod
+    def _replace_symbol(source: str, symbol: str, replacement: str, path: str) -> str:
+        """Replace one top-level class/function without asking for the whole file."""
+        try:
+            tree = ast.parse(source, filename=path)
+        except SyntaxError as exc:
+            raise ValueError(f"cannot edit symbol in invalid Python source: {exc}") from exc
+        matches = [
+            node
+            for node in tree.body
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef))
+            and node.name == symbol
+        ]
+        if len(matches) != 1:
+            raise ValueError(f"symbol edit must find exactly one top-level {symbol!r}; found {len(matches)}")
+        node = matches[0]
+        start = min([node.lineno] + [decorator.lineno for decorator in node.decorator_list]) - 1
+        end = node.end_lineno or node.lineno
+        lines = source.splitlines(keepends=True)
+        replacement = replacement.rstrip("\n") + "\n"
+        return "".join(lines[:start] + [replacement] + lines[end:])
+
+    @staticmethod
+    def _validate_python(source: str, target: Path, contract: TaskContract) -> None:
+        try:
+            tree = ast.parse(source, filename=str(target))
+        except SyntaxError as exc:
+            raise ValueError(f"Python syntax error in {target.name}: {exc}") from exc
+        names = [
+            node.name
+            for node in tree.body
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef))
+        ]
+        duplicates = sorted({name for name in names if names.count(name) > 1})
+        if duplicates:
+            raise ValueError(f"duplicate top-level definitions in {target.name}: {', '.join(duplicates)}")
+        if target.name == Path(contract.solution_entrypoint).name:
+            main_guards = [
+                node
+                for node in ast.walk(tree)
+                if isinstance(node, ast.If)
+                and isinstance(node.test, ast.Compare)
+                and isinstance(node.test.left, ast.Name)
+                and node.test.left.id == "__name__"
+            ]
+            if len(main_guards) > 1:
+                raise ValueError(f"multiple __main__ entry guards in {target.name}")
 
     @staticmethod
     def _safe_target(

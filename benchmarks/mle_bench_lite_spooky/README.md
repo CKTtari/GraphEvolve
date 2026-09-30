@@ -42,13 +42,20 @@ $env:LLM_API_KEY = "<your-key>"
 conda run -n nlphw python run_graph_evolve.py `
   --model gpt-6-luna `
   --base-url https://yuzapi.fun/v1 `
-  --budget-seconds 2400 `
-  --max-iterations 12 `
+  --budget-seconds 18000 `
+  --max-iterations 20 `
   --max-repair-steps 100
 ```
 
+The default research budget is five hours (`18000` seconds). The task contract
+still limits one candidate execution to `300` seconds; the five-hour budget is
+for the complete serial research session, including planning, code changes,
+repairs and evaluation.
+
 The run records each code change, private score, runtime, failure and graph
-decision under `runs/graph_evolve_state/`.
+decision under `runs/graph_evolve_state/`. The process stops earlier after four
+completed research rounds without an improvement over the incumbent. Technical
+repairs do not count as research rounds.
 
 ## First measured run
 
@@ -71,3 +78,13 @@ The project keeps technical repair steps separate from research rounds. A
 repair step can continue, switch implementation, or abandon the candidate;
 `100` is only a safety cap and is not a research-round budget. These numbers are
 a single-task local measurement, not an official MLE-bench Lite aggregate score.
+
+## 5-hour v2 postmortem
+
+The run `mle-lite-spooky-graphevolve-5h-20260929-v2` completed seven research
+rounds and stopped after rounds 4–7 all failed to beat the round-3 incumbent
+(`0.407128`). Its scores were `1.085458`, `0.422865`, `0.414131`, and
+`0.531821`. The path stayed inside temperature calibration and recovery after
+round 3; it did not return to the stronger fixed word-plus-character control.
+The detailed evidence and comparison are in
+[`POSTMORTEM_5H_V2.md`](POSTMORTEM_5H_V2.md).

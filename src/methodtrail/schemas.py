@@ -53,10 +53,18 @@ class TaskContract(BaseModel):
     maximize_metric: bool = True
     allow_self_reported_metric: bool = False
     timeout_seconds: int = Field(default=1800, ge=1)
+    # Keep a small tail of the research budget for final output, trajectory
+    # writing and a last repair decision.  A candidate must fit before this
+    # reserve is consumed; it is not counted as a research round.
+    finalization_reserve_seconds: int = Field(default=60, ge=0)
     # Repair is an internal technical loop.  It must not be confused with the
     # number of research rounds.  The large safety cap prevents a broken
     # adapter from spinning forever; RecoveryAgent can stop much earlier.
     max_repair_steps: int = Field(default=100, ge=1, le=1000)
+    # Kept for contract compatibility. Semantic review failures no longer
+    # auto-abandon a candidate; RecoveryAgent must explicitly choose that
+    # action. The hard repair-step and shared-time limits remain safety guards.
+    max_semantic_review_retries: int = Field(default=3, ge=1, le=10)
     # Kept only so older task contracts can still be loaded.  Runtime code does
     # not use it as the research-round budget.
     max_repair_attempts: int | None = Field(default=None, ge=0, le=1000)
@@ -84,6 +92,7 @@ class TaskContract(BaseModel):
                 "private_evaluator_dir",
                 "private_evaluation_command",
                 "max_repair_steps",
+                "max_semantic_review_retries",
                 "max_repair_attempts",
                 "search_policy",
                 "exploration_rounds",
@@ -107,6 +116,7 @@ class ResearchState(BaseModel):
     portfolio_context: list[dict[str, Any]] = Field(default_factory=list)
     memory_context: list[dict[str, Any]] = Field(default_factory=list)
     method_pool: list[dict[str, Any]] = Field(default_factory=list)
+    memory_graph_context: dict[str, Any] = Field(default_factory=dict)
 
 
 class HypothesisArtifact(BaseModel):
@@ -122,8 +132,13 @@ class ChangeRequestArtifact(BaseModel):
     title: str
     mutation_class: MutationClass
     relation: Literal["deepen", "ablate", "combine", "explore", "recover"] = "explore"
+    relation_warning: str | None = None
     research_question: str
     parent_variant_id: str | None = None
+    # The code parent says which workspace/version is edited.  These optional
+    # IDs say which measured outcomes informed the research decision; there
+    # may be more than one and they do not imply code inheritance.
+    evidence_parent_ids: list[str] = Field(default_factory=list)
     allowed_files: list[str] = Field(default_factory=list)
     required_invariants: list[str] = Field(default_factory=list)
     expected_gain: float = Field(default=0.0, ge=0.0)
@@ -155,30 +170,53 @@ class CandidateSelectionArtifact(BaseModel):
 class FileEdit(BaseModel):
     """One constrained source edit proposed by the Coding Agent.
 
-    Existing files can only be changed by replacing one exact, unique snippet.
-    Full contents are reserved for creating a genuinely new file.
+    Existing files default to one exact, unique snippet replacement.  A symbol
+    replacement is available when a whole function/class must change, and an
+    explicit rewrite is reserved for replacing the declared solution entrypoint.
     """
 
-    operation: Literal["create", "replace"]
+    operation: Literal["create", "replace", "replace_symbol", "rewrite"]
     path: str
     old_text: str | None = None
+    symbol: str | None = None
     new_text: str
     purpose: str
 
     @model_validator(mode="after")
     def validate_edit(self) -> FileEdit:
-        if self.operation == "create" and self.old_text is not None:
-            raise ValueError("create edits must not include old_text")
-        if self.operation == "replace" and not self.old_text:
-            raise ValueError("replace edits require a non-empty old_text")
+        if self.operation == "create" and (self.old_text is not None or self.symbol):
+            raise ValueError("create edits must not include old_text or symbol")
+        if self.operation == "replace" and (not self.old_text or self.symbol):
+            raise ValueError("replace edits require old_text and no symbol")
+        if self.operation == "replace_symbol" and (not self.symbol or self.old_text):
+            raise ValueError("replace_symbol edits require symbol and no old_text")
+        if self.operation == "rewrite" and (self.old_text or self.symbol):
+            raise ValueError("rewrite edits replace the complete entrypoint")
         return self
 
 
 class CodePlanArtifact(BaseModel):
     summary: str
     affected_interfaces: list[str] = Field(default_factory=list)
+    invariant_checks: list[str] = Field(default_factory=list)
     expected_test: str
     edits: list[FileEdit] = Field(min_length=1)
+
+
+class ImplementationReviewArtifact(BaseModel):
+    """A pre-execution review of the realized code change.
+
+    The review is deliberately separate from the research assessment.  It
+    checks whether the edit actually implements the selected question and
+    preserves the declared comparison target; it does not judge the metric.
+    """
+
+    passed: bool
+    scope_ok: bool = True
+    invariants_ok: bool = True
+    summary: str
+    checks: list[str] = Field(default_factory=list)
+    issues: list[str] = Field(default_factory=list)
 
 
 class VerificationResult(BaseModel):
@@ -223,11 +261,15 @@ class RecoveryArtifact(BaseModel):
 
 class PathNode(BaseModel):
     variant_id: str
+    iteration: int | None = None
     title: str
     parent_variant_id: str | None = None
+    evidence_parent_ids: list[str] = Field(default_factory=list)
     relation: Literal["deepen", "ablate", "combine", "explore", "recover"] = "explore"
+    relation_warning: str | None = None
     mutation_class: MutationClass
     question: str
+    change_logic: str = ""
     evidence_summary: str
     applicable_conditions: list[str] = Field(default_factory=list)
     metric: float | None = None
@@ -261,6 +303,23 @@ class ValueWeights(BaseModel):
     beta: float = Field(default=1.0, ge=0.0)
     gamma: float = Field(default=1.0, ge=0.0)
     delta: float = Field(default=1.0, ge=0.0)
+
+    @classmethod
+    def for_stage(cls, remaining_fraction: float, has_incumbent: bool) -> ValueWeights:
+        """Set transparent search priorities from experiment stage, not task names.
+
+        Early rounds value information; once a reliable incumbent exists, direct
+        improvement matters more; near the deadline, cost and failure risk rise.
+        The interpolation is deterministic and recorded with every ranking.
+        """
+        fraction = min(1.0, max(0.0, remaining_fraction))
+        if not has_incumbent:
+            return cls(alpha=0.8, beta=1.2, gamma=0.9, delta=1.0)
+        if fraction < 0.25:
+            return cls(alpha=1.0, beta=0.8, gamma=1.3, delta=1.3)
+        if fraction > 0.5:
+            return cls(alpha=1.2, beta=1.0, gamma=1.0, delta=1.1)
+        return cls(alpha=1.0, beta=1.0, gamma=1.1, delta=1.15)
 
     @classmethod
     def for_search_policy(
