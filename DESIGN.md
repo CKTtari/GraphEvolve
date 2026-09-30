@@ -594,6 +594,16 @@ related graph nodes and their evidence summaries
 
 The agent receives this compact context pack instead of the entire repository. It can request further files through a read-only retrieval tool. This supports multi-file changes without filling the context window with unrelated run logs.
 
+The runtime enforces this boundary in `methodtrail.agents._context`: the
+default serialized pack is capped at 80,000 characters. It keeps the latest
+directed graph neighborhood and method pool as compact rows (node IDs,
+parents, edge traces, relation, family, factors, metric, and short change
+logic), preserves every candidate index passed to selection, and truncates
+source excerpts and prose independently. The artifact store remains the
+complete source of truth. A byte-identical patch is also detected before the
+next implementation review; the controller emits a typed no-progress failure
+and forwards it to Recovery/Coding instead of paying for an identical review.
+
 ### Workspace and code lifecycle
 
 Each implementation variant lives in a separate workspace created from a parent source snapshot. If the project is a Git repository, the executor uses a worktree or temporary branch; otherwise it copies the parent implementation into the run workspace. The lifecycle is:

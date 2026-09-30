@@ -3,6 +3,7 @@ from __future__ import annotations
 import sys
 from pathlib import Path
 
+from methodtrail.agents import _context
 from methodtrail.artifacts import ArtifactStore
 from methodtrail.execution import Executor, Verifier
 from methodtrail.llm import LLMDeadlineExceeded
@@ -29,6 +30,63 @@ from methodtrail.schemas import (
     ValueWeights,
 )
 from methodtrail.workspace import WorkspaceManager
+
+
+def test_agent_context_is_bounded_but_keeps_directed_graph_identity() -> None:
+    state = {
+        "task_id": "demo",
+        "iteration": 9,
+        "remaining_seconds": 300,
+        "incumbent_variant_id": "outcome-8",
+        "graph_context": [
+            {
+                "node_id": f"node-{index}",
+                "node_type": "outcome",
+                "title": f"method {index}",
+                "parent_variant_id": f"node-{index - 1}",
+                "relation": "deepen",
+                "metric": index / 100,
+                "change_logic": "x" * 2000,
+                "edge_trace": [{"relation": "lineage", "reason": "edge"}],
+            }
+            for index in range(30)
+        ],
+        "method_pool": [
+            {
+                "node_id": f"proposal-{index}",
+                "node_type": "proposal",
+                "title": f"proposal {index}",
+                "change_logic": "y" * 3000,
+            }
+            for index in range(100)
+        ],
+        "memory_context": [],
+    }
+    rendered = _context("select one candidate", context_limit=12_000, state=state)
+    assert len(rendered) <= 12_500
+    assert '"node_id":"node-29"' in rendered
+    assert '"parent_variant_id":"node-28"' in rendered
+    assert "truncated" in rendered
+
+
+def test_candidate_context_preserves_original_indices() -> None:
+    candidates = [
+        {
+            "index": index,
+            "priority": 1.0 - index / 100,
+            "graph_signal": {"feasible": True, "required_seconds": 20},
+            "candidate": {
+                "title": f"candidate {index}",
+                "relation": "combine",
+                "method": {"family": "fusion", "changed_factors": ["features"]},
+                "rationale": "z" * 5000,
+            },
+        }
+        for index in range(30)
+    ]
+    rendered = _context("choose", context_limit=20_000, ranked_candidates=candidates)
+    for index in range(30):
+        assert f'"index":{index}' in rendered
 
 
 def test_repo_map_reads_workspace_under_parent_runs_directory(tmp_path: Path) -> None:

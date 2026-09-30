@@ -66,6 +66,15 @@ Metric
 assessment remains separate; a patch can satisfy its stated invariants and
 still be rejected by the independent evaluator.
 
+Agent prompts use a bounded context pack rather than serializing the complete
+artifact database. Graph rows retain IDs, directed parent/edge meaning, method
+family, changed factors, metrics, and short evidence; candidate rows retain
+their original indices; source excerpts are capped per file. The default pack
+limit is 80,000 characters. If a repair applies a byte-identical diff already
+seen in the same candidate, GraphEvolve records a structured no-progress
+failure and skips a duplicate semantic-review call so Recovery and Coding can
+choose a different local edit.
+
 ### Dynamic method pool
 
 The method pool starts empty for a new project. The task contract provides data,

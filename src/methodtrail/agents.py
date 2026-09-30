@@ -25,6 +25,271 @@ Use only facts in the supplied context. Return one JSON object matching the requ
 Do not claim a run happened unless it is present in the context. Keep code changes within the task contract."""
 
 
+# LLM context is a working set, not a database dump.  The state object still
+# keeps the complete graph and artifact history on disk, but prompts receive a
+# bounded, role-neutral summary.  This is especially important for proposal
+# and selection calls: sending every node's full ``change_request`` made the
+# v6 prompts grow past 200k characters and caused the research budget to be
+# spent serialising and rereading old evidence.
+_DEFAULT_CONTEXT_LIMIT = 80_000
+
+
+def _short(value: Any, limit: int) -> Any:
+    """Return a stable, readable prefix for prompt text."""
+
+    if not isinstance(value, str) or len(value) <= limit:
+        return value
+    return value[: max(0, limit - 32)] + f" ...[truncated {len(value) - limit} chars]"
+
+
+def _compact_method(value: Any) -> dict[str, Any]:
+    if not isinstance(value, dict):
+        return {"value": _short(value, 240)}
+    return {
+        key: _short(value.get(key), 360)
+        for key in ("family", "components", "changed_factors", "target_scope")
+        if value.get(key) not in (None, "", [], {})
+    }
+
+
+def _compact_node(value: Any, *, include_change: bool = False) -> dict[str, Any]:
+    """Keep graph identity, evidence and edge meaning while dropping blobs."""
+
+    if not isinstance(value, dict):
+        return {"value": _short(value, 360)}
+    result: dict[str, Any] = {}
+    for key in (
+        "node_id",
+        "variant_id",
+        "node_type",
+        "status",
+        "iteration",
+        "title",
+        "relation",
+        "edge_type",
+        "context_role",
+        "distance",
+        "traversal",
+        "parent_variant_id",
+        "metric",
+        "wall_seconds",
+        "priority",
+        "relation_warning",
+        "evidence_parent_ids",
+        "decision",
+        "applicable_conditions",
+    ):
+        if key in value and value[key] not in (None, "", [], {}):
+            result[key] = _short(value[key], 360)
+    method = value.get("method") or value.get("method_descriptor")
+    if method:
+        result["method"] = _compact_method(method)
+    for key in (
+        "question",
+        "research_question",
+        "conclusion",
+        "change_logic",
+        "rationale",
+        "reason",
+        "evidence_summary",
+    ):
+        if value.get(key):
+            result[key] = _short(value[key], 520)
+    for key in ("measured_facts", "evidence"):
+        if value.get(key):
+            values = value[key] if isinstance(value[key], list) else [value[key]]
+            result[key] = [_short(item, 320) for item in values[:6]]
+    if include_change and value.get("change_request"):
+        change = value["change_request"]
+        if isinstance(change, dict):
+            result["change_request"] = {
+                key: _short(change.get(key), 420)
+                for key in (
+                    "title",
+                    "mutation_class",
+                    "relation",
+                    "research_question",
+                    "parent_variant_id",
+                    "required_invariants",
+                    "rationale",
+                )
+                if change.get(key) not in (None, "", [], {})
+            }
+            if change.get("method"):
+                result["change_request"]["method"] = _compact_method(change["method"])
+    if value.get("edge_trace"):
+        result["edge_trace"] = [
+            _compact_node(edge, include_change=False)
+            if isinstance(edge, dict)
+            else _short(edge, 300)
+            for edge in value["edge_trace"][:8]
+        ]
+    return result
+
+
+def _compact_candidate(value: Any) -> dict[str, Any]:
+    if not isinstance(value, dict):
+        return {"value": _short(value, 360)}
+    candidate = value.get("candidate") if isinstance(value.get("candidate"), dict) else value
+    result = {
+        key: _short(value.get(key), 360)
+        for key in ("index", "priority")
+        if key in value
+    }
+    signal = value.get("graph_signal")
+    if isinstance(signal, dict):
+        result["graph_signal"] = {
+            key: _short(signal.get(key), 360)
+            for key in (
+                "feasible",
+                "family_status",
+                "novelty",
+                "unproductive_family",
+                "required_seconds",
+                "estimated_seconds",
+                "failure_risk",
+                "composition_penalty",
+                "reason",
+            )
+            if signal.get(key) not in (None, "", [], {})
+        }
+    for key in (
+        "title",
+        "relation",
+        "mutation_class",
+        "research_question",
+        "expected_gain",
+        "information_gain",
+        "estimated_seconds",
+        "failure_risk",
+        "parent_variant_id",
+        "evidence_parent_ids",
+    ):
+        if candidate.get(key) not in (None, "", [], {}):
+            result[key] = _short(candidate[key], 420)
+    if candidate.get("method"):
+        result["method"] = _compact_method(candidate["method"])
+    # Rationale is useful for selection, but full prose and evidence duplicates
+    # the hypothesis and graph context.  Keep a short decision-facing excerpt.
+    if candidate.get("rationale"):
+        result["rationale"] = _short(candidate["rationale"], 180)
+    return result
+
+
+def _compact_state(value: Any) -> dict[str, Any]:
+    state = value if isinstance(value, dict) else {}
+    result = {
+        key: _short(state[key], 900)
+        for key in (
+            "task_id",
+            "iteration",
+            "remaining_seconds",
+            "best_metric",
+            "incumbent_metric",
+            "incumbent_variant_id",
+            "research_round",
+            "repair_step",
+        )
+        if key in state
+    }
+    for key, cap in (
+        ("recent_facts", 8),
+        ("unresolved_questions", 6),
+        ("path_hints", 10),
+    ):
+        if key in state:
+            values = state[key] if isinstance(state[key], list) else [state[key]]
+            result[key] = [
+                _short(item, 700) if isinstance(item, str) else _compact_node(item)
+                for item in values[-cap:]
+            ]
+    result["graph_context"] = [
+        _compact_node(item)
+        for item in (state.get("graph_context") or [])[-14:]
+    ]
+    result["method_pool"] = [
+        _compact_node(item, include_change=False)
+        for item in (state.get("method_pool") or [])[-36:]
+    ]
+    result["memory_context"] = [
+        _compact_node(item, include_change=False)
+        for item in (state.get("memory_context") or [])[:8]
+    ]
+    result["portfolio_context"] = [
+        {
+            key: _short(item.get(key), 360)
+            for key in (
+                "variant_id",
+                "metric",
+                "wall_seconds",
+                "information_gain",
+                "failure_risk",
+                "signature",
+            )
+            if item.get(key) is not None
+        }
+        for item in (state.get("portfolio_context") or [])[:8]
+        if isinstance(item, dict)
+    ]
+    profile = state.get("memory_graph_context")
+    if isinstance(profile, dict):
+        result["memory_graph_context"] = {
+            key: (
+                [_compact_node(row) for row in profile[key][:12]]
+                if isinstance(profile[key], list)
+                else _short(profile[key], 900)
+            )
+            for key in profile
+            if key in {"nodes", "edges", "families", "summary", "recent"}
+        }
+    return result
+
+
+def _compact_payload(key: str, value: Any) -> Any:
+    if isinstance(value, TaskContract):
+        return value.llm_context()
+    if hasattr(value, "model_dump"):
+        value = value.model_dump(mode="json")
+    if key == "state":
+        return _compact_state(value)
+    if key in {"ranked_candidates", "candidates"} and isinstance(value, list):
+        return [_compact_candidate(item) for item in value[:40]]
+    if key in {"repository_context", "repo_context"} and isinstance(value, list):
+        compact = []
+        for item in value[:8]:
+            if isinstance(item, dict):
+                compact.append(
+                    {
+                        name: _short(item.get(name), 9000 if name == "content" else 420)
+                        for name in ("path", "content", "language", "retrieval_reason")
+                        if item.get(name) is not None
+                    }
+                )
+            else:
+                compact.append(_short(item, 9000))
+        return compact
+    if key in {"known_failures", "issues", "checks"} and isinstance(value, list):
+        return [_short(item, 900) if isinstance(item, str) else _compact_node(item) for item in value[:12]]
+    if isinstance(value, list):
+        return [_short(item, 900) if isinstance(item, str) else item for item in value[:30]]
+    if isinstance(value, dict):
+        return {
+            name: _short(item, 1200) if isinstance(item, str) else item
+            for name, item in list(value.items())[:60]
+        }
+    return _short(value, 1200)
+
+
+def _shrink_strings(value: Any, limit: int = 2600) -> Any:
+    if isinstance(value, str):
+        return _short(value, limit)
+    if isinstance(value, list):
+        return [_shrink_strings(item, limit) for item in value]
+    if isinstance(value, dict):
+        return {key: _shrink_strings(item, limit) for key, item in value.items()}
+    return value
+
+
 class ReflectionAgent:
     def __init__(self, llm: StructuredLLM) -> None:
         self.llm = llm
@@ -424,21 +689,58 @@ conclusion. Keep the decision unchanged.""",
         return self.llm.complete(SYSTEM, user, AssessmentArtifact)
 
 
-def _context(instruction: str, **payload: Any) -> str:
+def _context(
+    instruction: str, *, context_limit: int = _DEFAULT_CONTEXT_LIMIT, **payload: Any
+) -> str:
+    """Build a bounded prompt without losing the graph's directed evidence.
+
+    The complete state remains available in the artifact store.  Prompt
+    context is sampled by role: graph rows keep IDs, parent/edge meaning,
+    method family and metric; repository rows keep only the files relevant to
+    the edit; candidate rows keep every original index so selection remains
+    valid.  The final shrink is a safety valve for unusually large source
+    files, and still emits valid JSON rather than cutting a serialized object
+    in the middle.
+    """
+
     packed = {
-        key: (
-            value.llm_context()
-            if isinstance(value, TaskContract)
-            else value.model_dump(mode="json")
-            if hasattr(value, "model_dump")
-            else value
-        )
+        key: _compact_payload(key, value)
         for key, value in payload.items()
         if value is not None
     }
-    return (
-        f"{instruction}\n\nContext:\n{json.dumps(packed, ensure_ascii=False, indent=2)}"
-    )
+    serialized = json.dumps(packed, ensure_ascii=False, separators=(",", ":"))
+    if len(serialized) > context_limit:
+        # Prefer preserving all candidate indices and the latest state while
+        # making prose and source excerpts progressively smaller.
+        packed = _shrink_strings(packed, limit=1400)
+        serialized = json.dumps(packed, ensure_ascii=False, separators=(",", ":"))
+    if len(serialized) > context_limit:
+        for key in ("method_pool", "graph_context", "memory_context", "portfolio_context"):
+            if isinstance(packed.get("state"), dict) and isinstance(packed["state"].get(key), list):
+                packed["state"][key] = packed["state"][key][-8:]
+        serialized = json.dumps(packed, ensure_ascii=False, separators=(",", ":"))
+    if len(serialized) > context_limit:
+        # This should be rare after the per-field caps.  Keep the instruction,
+        # contract, state scalars, and a clearly marked compact remainder.
+        compact: dict[str, Any] = {}
+        for key in (
+            "contract",
+            "state",
+            "change",
+            "hypothesis",
+            "run",
+            "recovery",
+            "ranked_candidates",
+            "candidates",
+        ):
+            if key in packed:
+                compact[key] = packed[key]
+        compact["context_notice"] = (
+            "Older graph/source details were compacted after reaching the prompt limit; "
+            "use the supplied IDs and current repository files for the next decision."
+        )
+        serialized = json.dumps(_shrink_strings(compact, 900), ensure_ascii=False, separators=(",", ":"))
+    return f"{instruction}\n\nContext:\n{serialized}"
 
 
 # Names used by the design document.  These thin subclasses preserve the old

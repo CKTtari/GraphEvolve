@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import re
@@ -517,6 +518,7 @@ class MethodTrail:
         current_change = change
         started = time.monotonic()
         last_review: ImplementationReviewArtifact | None = None
+        seen_patch_signatures: set[str] = set()
 
         while True:
             if time.monotonic() - started >= max(1, remaining_seconds):
@@ -564,18 +566,38 @@ class MethodTrail:
                     },
                     [current_plan_id],
                 )
-                review = self.implementation_reviewer.review(
-                    contract,
-                    current_change,
-                    current_plan,
-                    diff,
-                    RepoMap(workspace).retrieve(
-                        f"{current_change.research_question} {current_change.title}",
-                        full_paths=set(contract.editable_paths),
-                    ),
-                    known_failures=self.bug_memory.guidance(contract.task_id, limit=12),
-                    initial_candidate=candidate.parent_variant_id is None,
-                )
+                patch_signature = hashlib.sha256(diff.encode("utf-8")).hexdigest()
+                if patch_signature in seen_patch_signatures:
+                    # A byte-identical repair cannot provide new semantic
+                    # evidence. Keep a structured failure for Recovery/Coding
+                    # and avoid paying for a duplicate LLM review call.
+                    review = ImplementationReviewArtifact(
+                        passed=False,
+                        scope_ok=False,
+                        invariants_ok=False,
+                        summary="repair made no progress",
+                        checks=["the applied diff repeats an earlier patch"],
+                        issues=[
+                            (
+                                "Produce a different minimal edit after rereading the latest workspace; "
+                                f"repeated diff signature is {patch_signature[:12]}."
+                            )
+                        ],
+                    )
+                else:
+                    seen_patch_signatures.add(patch_signature)
+                    review = self.implementation_reviewer.review(
+                        contract,
+                        current_change,
+                        current_plan,
+                        diff,
+                        RepoMap(workspace).retrieve(
+                            f"{current_change.research_question} {current_change.title}",
+                            full_paths=set(contract.editable_paths),
+                        ),
+                        known_failures=self.bug_memory.guidance(contract.task_id, limit=12),
+                        initial_candidate=candidate.parent_variant_id is None,
+                    )
                 review_id = self.store.put(
                     "implementation_review" if repair_step == 0 else "repair_implementation_review",
                     review,
