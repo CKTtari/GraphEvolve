@@ -87,7 +87,7 @@ class TaskContract(BaseModel):
     def llm_context(self) -> dict[str, Any]:
         """Task facts the research roles may see; never disclose private paths."""
 
-        return self.model_dump(
+        context = self.model_dump(
             exclude={
                 "private_evaluator_dir",
                 "private_evaluation_command",
@@ -98,6 +98,15 @@ class TaskContract(BaseModel):
                 "exploration_rounds",
             }
         )
+        if self.private_evaluator_dir or self.private_evaluation_command:
+            context["metric_boundary"] = (
+                "The independent evaluator computes the primary metric after the "
+                "solution writes its required outputs. Private labels and the "
+                "resulting primary score are unavailable to solution code. "
+                "Code may report public validation metrics, but must not print, "
+                "guess, or hard-code the private score."
+            )
+        return context
 
 
 class ResearchState(BaseModel):
@@ -212,11 +221,14 @@ class ImplementationReviewArtifact(BaseModel):
     """
 
     passed: bool
+    decision: Literal["pass", "repair", "replan"] = "repair"
+    replan_required: bool = False
     scope_ok: bool = True
     invariants_ok: bool = True
     summary: str
     checks: list[str] = Field(default_factory=list)
     issues: list[str] = Field(default_factory=list)
+    candidate_adjustments: list[str] = Field(default_factory=list)
 
 
 class VerificationResult(BaseModel):
@@ -256,7 +268,7 @@ class RecoveryArtifact(BaseModel):
     repair_directions: list[str]
     preserve_question: bool
     return_to_reflection_reason: str
-    action: Literal["continue_repair", "switch_implementation", "abandon_candidate"] = "continue_repair"
+    action: Literal["continue_repair", "switch_implementation", "abandon_candidate", "replan_candidate"] = "continue_repair"
 
 
 class PathNode(BaseModel):

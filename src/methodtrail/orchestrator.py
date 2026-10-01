@@ -37,6 +37,7 @@ from .schemas import (
     ImplementationReviewArtifact,
     MutationClass,
     PathNode,
+    RecoveryArtifact,
     ResearchState,
     RunArtifact,
     TaskContract,
@@ -63,6 +64,10 @@ class IterationResult:
 
 class BudgetExhausted(RuntimeError):
     """Raised before editing when no executable candidate fits the tail budget."""
+
+
+class NoExecutableCandidate(RuntimeError):
+    """Raised when discovery only repeats candidates that were already rejected."""
 
 
 def _failure_signature(run: RunArtifact) -> str:
@@ -160,6 +165,7 @@ class MethodTrail:
         parent_variant_id: str | None = None,
         trigger: str | None = None,
         hypothesis_override: HypothesisArtifact | None = None,
+        constraint_feedback: str | None = None,
     ) -> IterationResult:
         iteration_started = time.monotonic()
         self._ensure_project_session(contract)
@@ -184,7 +190,12 @@ class MethodTrail:
         # after valid evidence changes the question.
         hypothesis = hypothesis_override or self.reflection.refine(contract, state, trigger)
         hypothesis_id = self.store.put("hypothesis", hypothesis, [state_id])
-        proposals = self.choose.propose(contract, state, hypothesis)
+        proposals = self.choose.propose(
+            contract,
+            state,
+            hypothesis,
+            constraint_feedback=constraint_feedback,
+        )
         coverage_gap = candidate_coverage_gap(
             proposals.candidates,
             initial=state.iteration <= 1 and state.incumbent_metric is None,
@@ -201,6 +212,7 @@ class MethodTrail:
                 state,
                 hypothesis,
                 coverage_feedback=coverage_gap,
+                constraint_feedback=constraint_feedback,
             )
         attached = self.graph.attach_proposals(
             graph_parent_variant_id, proposals.candidates, state.iteration
@@ -213,7 +225,7 @@ class MethodTrail:
             if proposal_id not in existing_ids:
                 attached.append((proposal_id, change))
         if not attached:
-            raise RuntimeError(
+            raise NoExecutableCandidate(
                 "method discovery produced no new or revisitable executable node"
             )
         proposal_node_ids = [proposal_node_id for proposal_node_id, _ in attached]
@@ -372,6 +384,37 @@ class MethodTrail:
             plan_id,
             max(1, int(remaining_seconds - (time.monotonic() - iteration_started))),
         )
+        if last_recovery and last_recovery.action == "replan_candidate":
+            # Keep the selected proposal auditable, but do not turn an
+            # unsatisfiable candidate contract into measured failure evidence.
+            self.graph.mark_proposal_replan_rejected(
+                proposal_node_id,
+                last_recovery.diagnosis,
+                last_recovery.repair_directions,
+            )
+            self.projects.record_candidate(self.project, candidate, status="deferred")
+            result = IterationResult(
+                iteration=state.iteration,
+                workspace=workspace,
+                change=change,
+                run=run,
+                assessment=None,
+                next_hypothesis=last_recovery.return_to_reflection_reason,
+                artifact_ids={
+                    "state": state_id,
+                    "hypothesis": hypothesis_id,
+                    "change": change_id,
+                    "plan": plan_id,
+                    "run": run_id,
+                    "repair": repair_ids,
+                    "variant": candidate.variant_id,
+                },
+                hypothesis=hypothesis,
+                resume_mode="replan",
+                completed_research=False,
+            )
+            self._write_handoff(result)
+            return result
         if run.return_code != 0 or run.timed_out or run.metric is None:
             self.projects.record_candidate(
                 self.project, candidate, status="failed", metric=run.metric
@@ -407,7 +450,23 @@ class MethodTrail:
             self._write_handoff(result)
             return result
 
-        assessment = self.assess.assess(contract, state, change, run)
+        try:
+            assessment = self.assess.assess(contract, state, change, run)
+        except Exception as exc:
+            self._preserve_unassessed_run(
+                contract,
+                state,
+                change,
+                candidate,
+                workspace,
+                run,
+                run_id,
+                proposal_node_id,
+                repair_ids,
+                {"state": state_id, "hypothesis": hypothesis_id, "change": change_id, "plan": plan_id},
+                exc,
+            )
+            raise
         if (
             assessment.decision == "adopt"
             and run.metric_constraints_passed is False
@@ -473,14 +532,18 @@ class MethodTrail:
                 },
             )
         except LLMDeadlineExceeded as exc:
-            # The run itself is valid even when the optional memory write cannot
-            # fit in the remaining budget. Preserve its measured value so the
-            # finalization step can adopt it when no incumbent exists.
-            self.projects.record_candidate(
-                self.project,
+            self._preserve_unassessed_run(
+                contract,
+                state,
+                change,
                 candidate,
-                status="deferred",
-                metric=run.metric,
+                workspace,
+                run,
+                run_id,
+                proposal_node_id,
+                repair_ids,
+                {"state": state_id, "hypothesis": hypothesis_id, "change": change_id, "plan": plan_id},
+                exc,
             )
             self.projects.append_event(
                 self.project,
@@ -494,8 +557,183 @@ class MethodTrail:
                 },
             )
             raise
+        except Exception as exc:
+            self._preserve_unassessed_run(
+                contract,
+                state,
+                change,
+                candidate,
+                workspace,
+                run,
+                run_id,
+                proposal_node_id,
+                repair_ids,
+                {"state": state_id, "hypothesis": hypothesis_id, "change": change_id, "plan": plan_id},
+                exc,
+            )
+            raise
         self._write_handoff(result)
         return result
+
+    def _preserve_unassessed_run(
+        self,
+        contract: TaskContract,
+        state: ResearchState,
+        change: ChangeRequestArtifact,
+        candidate: CandidateRecord,
+        workspace: Path,
+        run: RunArtifact,
+        run_id: str,
+        proposal_node_id: str,
+        repair_ids: list[str],
+        artifact_ids: dict[str, str],
+        error: Exception,
+    ) -> None:
+        assert self.project is not None and self.session is not None
+        if run.return_code != 0 or run.timed_out or run.metric is None:
+            return
+        already_adopted = self.project.incumbent_variant_id == candidate.variant_id
+        improves = (
+            run.metric_constraints_passed is not False
+            and self._metric_improves_incumbent(contract, run.metric)
+        )
+        adopted = already_adopted or improves
+        summary = (
+            f"Independent evaluator measured {contract.metric_name}={run.metric}. "
+            "The assessment agent did not finish; no causal conclusion was inferred."
+        )
+        assessment = AssessmentArtifact(
+            decision="adopt" if adopted else "defer",
+            reason=summary,
+            reusable_conclusion=summary,
+            applicable_conditions=[
+                "The independent evaluator completed successfully.",
+                "Agent assessment was unavailable after measurement.",
+            ],
+            next_question=change.research_question,
+        )
+        fallback_id = self.store.put("assessment_fallback", assessment, [run_id])
+        if candidate.variant_id not in self.graph.graph:
+            self.graph.add_node(
+                PathNode(
+                    variant_id=candidate.variant_id,
+                    iteration=state.iteration,
+                    title=change.title,
+                    parent_variant_id=change.parent_variant_id,
+                    evidence_parent_ids=change.evidence_parent_ids,
+                    relation=change.relation,
+                    relation_warning=self.graph.relation_warning_for(change.parent_variant_id, change),
+                    mutation_class=change.mutation_class,
+                    question=change.research_question,
+                    change_logic=change.rationale,
+                    evidence_summary=summary,
+                    applicable_conditions=assessment.applicable_conditions,
+                    metric=run.metric,
+                    wall_seconds=run.wall_seconds,
+                    failure_risk=change.failure_risk,
+                    status="adopted" if adopted else "deferred",
+                    method=change.method,
+                )
+            )
+        # A later assessment or memory call may fail after the outcome node
+        # was already written. Its status must still match the measured
+        # incumbent decision recovered here.
+        self.graph.graph.nodes[candidate.variant_id]["status"] = (
+            "adopted" if adopted else "deferred"
+        )
+        self.graph.record_outcome(
+            proposal_node_id,
+            candidate.variant_id,
+            "adopted" if adopted else "deferred",
+        )
+        if not any(
+            node.get("variant_id") == candidate.variant_id
+            for node in self.experiment_memory.graph.nodes.values()
+        ):
+            card = self.experiment_memory.add(
+                MemoryCard(
+                    task_id=contract.task_id,
+                    session_id=self.session.session_id,
+                    variant_id=candidate.variant_id,
+                    parent_variant_id=change.parent_variant_id,
+                    evidence_parent_ids=change.evidence_parent_ids,
+                    question=change.research_question,
+                    conclusion=summary,
+                    measured_facts=[f"{contract.metric_name}={run.metric}"],
+                    evidence=["independent evaluator output"],
+                    applicable_conditions=assessment.applicable_conditions,
+                    relation=change.relation,
+                    decision=assessment.decision,
+                    metric=run.metric,
+                    method_family=change.method.family,
+                    changed_factors=change.method.changed_factors,
+                    iteration=state.iteration,
+                    title=change.title,
+                    mutation_class=change.mutation_class.value,
+                    change_logic=change.rationale,
+                    method_components=change.method.components,
+                )
+            )
+            artifact_ids["memory"] = self.store.put("memory_fallback", card, [fallback_id])
+        if candidate.variant_id not in self.portfolio.profiles:
+            self.portfolio.register(
+                VariantProfile(
+                    variant_id=candidate.variant_id,
+                    metric=run.metric,
+                    wall_seconds=run.wall_seconds,
+                    reliability=1.0,
+                    information_gain=change.information_gain,
+                    failure_risk=change.failure_risk,
+                    signature=f"{change.mutation_class}:{change.title}",
+                )
+            )
+        if improves:
+            self.projects.adopt_candidate(
+                self.project,
+                candidate,
+                candidate.source_files,
+                f"methodtrail: independently measured {change.title}",
+                run.metric,
+            )
+        elif not already_adopted:
+            self.projects.record_candidate(
+                self.project,
+                candidate,
+                status="constraint_failed" if run.metric_constraints_passed is False else "deferred",
+                metric=run.metric,
+            )
+        self._write_handoff(
+            IterationResult(
+                iteration=state.iteration,
+                workspace=workspace,
+                change=change,
+                run=run,
+                assessment=assessment,
+                next_hypothesis=assessment.next_question,
+                artifact_ids={**artifact_ids, "run": run_id, "assessment": fallback_id, "repair": repair_ids, "variant": candidate.variant_id},
+                completed_research=True,
+            )
+        )
+        self.projects.update_session(
+            self.project,
+            self.session,
+            status="interrupted",
+            current_variant_id=self.project.incumbent_variant_id,
+            consecutive_non_improving=(
+                0 if adopted else self.session.consecutive_non_improving + 1
+            ),
+        )
+        self.projects.append_event(
+            self.project,
+            self.session.session_id,
+            "assessment_interrupted",
+            {
+                "iteration": state.iteration,
+                "variant_id": candidate.variant_id,
+                "metric": run.metric,
+                "reason": f"{type(error).__name__}: {str(error)[:240]}",
+            },
+        )
 
     def _execute_with_repairs(
         self,
@@ -603,6 +841,43 @@ class MethodTrail:
                     review,
                     [implementation_id],
                 )
+                if review.replan_required or review.decision == "replan":
+                    adjustments = review.candidate_adjustments or review.issues
+                    recovery = RecoveryArtifact(
+                        failure_class="candidate_contract",
+                        diagnosis=review.summary,
+                        repair_directions=list(adjustments),
+                        preserve_question=True,
+                        return_to_reflection_reason=(
+                            "Revise the selected candidate contract before editing: "
+                            + "; ".join(adjustments[:4])
+                        ),
+                        action="replan_candidate",
+                    )
+                    recovery_id = self.store.put("recovery", recovery, [review_id])
+                    repair_ids.append(recovery_id)
+                    run = RunArtifact(
+                        command=contract.run_command,
+                        return_code=-8,
+                        timed_out=False,
+                        wall_seconds=0.0,
+                        stdout="",
+                        stderr=(
+                            "candidate contract requires re-planning: "
+                            + ("; ".join(adjustments) or review.summary)
+                        ),
+                    )
+                    run_id = self.store.put("run", run, [recovery_id])
+                    self._record_bug(
+                        contract,
+                        current_change,
+                        candidate,
+                        run,
+                        "candidate_contract",
+                        repair_step,
+                        recovery=recovery,
+                    )
+                    return run, run_id, repair_ids, recovery
                 if not review.passed:
                     last_review = review
                     detail = "\n".join(review.issues) or review.summary
@@ -735,6 +1010,7 @@ class MethodTrail:
             set_deadline(time.monotonic() + total_seconds)
         remaining_seconds = total_seconds
         trigger: str | None = None
+        constraint_feedback: str | None = None
         pending_hypothesis: HypothesisArtifact | None = None
         current_parent = parent_variant_id
         results: list[IterationResult] = []
@@ -767,6 +1043,7 @@ class MethodTrail:
                     parent_variant_id=current_parent,
                     trigger=trigger,
                     hypothesis_override=pending_hypothesis,
+                    constraint_feedback=constraint_feedback,
                 )
             except (BudgetExhausted, LLMDeadlineExceeded) as exc:
                 elapsed = max(1, int(time.monotonic() - iteration_started))
@@ -782,6 +1059,19 @@ class MethodTrail:
                                 contract, remaining_seconds
                             ),
                             "reason": str(exc),
+                        },
+                    )
+                break
+            except NoExecutableCandidate as exc:
+                if self.project is not None and self.session is not None:
+                    self.projects.append_event(
+                        self.project,
+                        self.session.session_id,
+                        "research_stop",
+                        {
+                            "reason": str(exc),
+                            "completed_rounds": completed_rounds,
+                            "consecutive_non_improving": consecutive_non_improving,
                         },
                     )
                 break
@@ -833,8 +1123,13 @@ class MethodTrail:
             ):
                 break
             trigger = result.next_hypothesis
+            constraint_feedback = (
+                result.next_hypothesis if result.resume_mode == "replan" else None
+            )
             pending_hypothesis = (
-                result.hypothesis if result.resume_mode == "technical" else None
+                result.hypothesis
+                if result.resume_mode in {"technical", "replan"}
+                else None
             )
             if result.assessment and result.assessment.decision == "adopt":
                 current_parent = result.artifact_ids.get("variant", current_parent)
@@ -1252,7 +1547,11 @@ class MethodTrail:
         """Leave a compact restart point without replaying the full LLM chat."""
 
         assert self.project is not None and self.session is not None
-        decision = result.assessment.decision if result.assessment else "recovery"
+        decision = (
+            result.assessment.decision
+            if result.assessment
+            else "replan" if result.resume_mode == "replan" else "recovery"
+        )
         metric = result.run.metric if result.run else None
         active_variant = (
             result.artifact_ids.get("variant")

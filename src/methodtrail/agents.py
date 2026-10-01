@@ -75,6 +75,8 @@ def _compact_node(value: Any, *, include_change: bool = False) -> dict[str, Any]
         "wall_seconds",
         "priority",
         "relation_warning",
+        "replan_reason",
+        "candidate_adjustments",
         "evidence_parent_ids",
         "decision",
         "applicable_conditions",
@@ -310,8 +312,11 @@ def _compact_payload(key: str, value: Any) -> Any:
                 for name, item in value.items()
                 if name in {
                     "failure_class",
+                    "decision",
+                    "replan_required",
                     "diagnosis",
                     "repair_directions",
+                    "candidate_adjustments",
                     "preserve_question",
                     "return_to_reflection_reason",
                     "action",
@@ -397,6 +402,7 @@ class ChooseAgent:
         state: ResearchState,
         hypothesis: HypothesisArtifact,
         coverage_feedback: str | None = None,
+        constraint_feedback: str | None = None,
     ) -> CandidateProposalArtifact:
         initial = state.iteration <= 1 and state.incumbent_metric is None
         phase_instruction = (
@@ -422,6 +428,18 @@ representation families ineligible."""
         )
         if coverage_feedback:
             phase_instruction += f"\n\nProgrammatic coverage review found a gap:\n{coverage_feedback}\nRevise the candidate batch to close this gap while keeping every candidate executable and tied to the hypothesis."
+        if constraint_feedback:
+            phase_instruction += (
+                "\n\nThe previous selected candidate was returned for contract re-planning. "
+                "Keep the same research question and intended comparison. "
+                "Treat the review as a hard design constraint: do not recreate "
+                "the rejected invariant. Revise the candidate's method map, "
+                "settings, and declared checks only as needed so the experiment "
+                "is executable and each check is observable at the right stage; "
+                "or choose another candidate that tests the same question. "
+                "Explain the revision in its rationale. Feedback:\n"
+                + constraint_feedback
+            )
         user = _context(
             f"""{phase_instruction}
 
@@ -456,7 +474,12 @@ meaning. The graph may flag a mismatch between the relation and component map,
 but it will not silently relabel your experiment. You may also set
 evidence_parent_ids to existing measured outcome IDs whose conclusions
 informed this proposal. These are evidence links, not code parents, and must
-not be proposal IDs.""",
+not be proposal IDs. When the contract uses an independent evaluator, make
+required_invariants checkable before or after execution at the correct stage:
+solution code must write valid predictions, public validation comparisons can
+be printed by that code, and the experiment controller compares the private
+primary metric after the evaluator runs. Never require solution code to report
+or compare an unavailable private score.""",
             contract=contract,
             state=state,
             hypothesis=hypothesis,
@@ -475,7 +498,12 @@ not be proposal IDs.""",
 original candidate index in each supplied row; do not use the row's position after sorting. Rows marked infeasible
 are not selectable. Explain how the method graph's family status, prior evidence, expected gain, information value,
 cost, and risk fit the current question and remaining budget. Prefer an unmeasured family when its value is
-comparable to a repeatedly unproductive family. Do not select an index outside the supplied list.""",
+comparable to a repeatedly unproductive family. After two non-improving
+outcomes in one family, select a feasible orthogonal branch unless there is a
+specific unresolved contradiction that another replication would answer.
+Changing only validation folds or mixture weights for the same method is not
+new information when repeated runs agree and the primary metric does not
+improve. Do not select an index outside the supplied list.""",
             contract=contract,
             state=state,
             hypothesis=hypothesis,
@@ -519,7 +547,9 @@ second program below an existing main guard. Do not edit protected or data files
 entrypoint and keep the change focused on the research question. Treat every
 required_invariant in the ChangeRequest as an acceptance check: explain in the
     plan how the edit satisfies it, and list a concrete check for each one in
-    invariant_checks. Do not
+    invariant_checks. For an independently evaluated task, implement only the
+    code-side portion of a metric invariant; the controller checks the private
+    metric after execution. Do not invent or print a private score. Do not
 silently change preprocessing, model family, validation, calibration, or
 inference components that are outside the declared change. State a test that
 should pass.
@@ -639,8 +669,22 @@ components and the comparison protocol must stay fixed; when relation is deepen,
 remove or replace a component only when the ChangeRequest's method map, changed_factors, rationale, and invariants
 explicitly describe that new method. Treat relation_warning as a prompt to resolve the ambiguity, not as permission to
 silently rewrite the research question. This review is not metric assessment and must not
-propose a new research question. Return passed=false with concrete issues so the technical repair loop can revise the
-same candidate. A review failure is technical feedback and does not consume a research round.""",
+propose a new research question. If the independent evaluator owns the primary
+metric, verify that the solution emits valid predictions and implements the
+public comparison. Do not demand that solution code know, print, or compare
+the private score before evaluation, even when a declared invariant combines
+code-side and evaluator-side checks. Leave the evaluator-side comparison to
+the controller. If the selected candidate's own required invariants or method
+map contradict each other, require unavailable data, or require solution code
+to see a private evaluator result, source edits cannot repair that contract.
+In that case set passed=false, decision="replan", replan_required=true, and
+list exact candidate_adjustments: which declaration is impossible, what can
+be checked instead, and which research question and intended comparison must
+be kept. Do not silently change the research question or relabel an ablation.
+Do not use replan for an ordinary code bug: set passed=false,
+decision="repair", and give concrete source-level issues. A replan returns to
+candidate selection in the same research round; neither outcome counts as
+measured evidence. Set decision="pass" only when passed=true.""",
             contract=contract,
             change=change,
             plan=plan,
@@ -690,6 +734,9 @@ class RecoveryAgent:
             """Classify only the technical failure. Keep the research question and
 the selected method target unchanged. Decide whether to continue repairing the
 same candidate or switch to a nearby implementation that tests the same question.
+When the implementation review explicitly marks replan_required, preserve that
+decision and return action="replan_candidate"; do not ask Coding Agent to patch
+an impossible contract.
 Use abandon_candidate only when the diagnosis establishes that the task contract,
 available dependencies, permissions, or execution environment make this candidate
 technically impossible; repeated review failures or a bad patch are reasons to

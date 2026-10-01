@@ -251,6 +251,32 @@ def test_late_candidate_coverage_breaks_a_repeating_non_improving_factor() -> No
     assert gap and "orthogonal" in gap
 
 
+def test_repeated_composition_does_not_mask_coverage_gap() -> None:
+    repeated = ChangeRequestArtifact(
+        title="another blend-weight repeat",
+        mutation_class=MutationClass.COMPOSITION,
+        relation="combine",
+        research_question="does another blend weight help?",
+        rationale="repeat the same composition family",
+        method=MethodDescriptor(
+            family="blend", changed_factors=["composition_weight"]
+        ),
+    )
+    recent = [
+        {
+            "improved": False,
+            "method": {
+                "family": "blend",
+                "changed_factors": ["composition_weight"],
+            },
+        }
+        for _ in range(2)
+    ]
+    assert candidate_coverage_gap(
+        [repeated], initial=False, recent_outcomes=recent
+    )
+
+
 def test_search_policy_changes_value_weights() -> None:
     breadth = ValueWeights.for_search_policy("breadth", 1, 3)
     balanced_late = ValueWeights.for_search_policy("balanced", 5, 3)
@@ -974,6 +1000,94 @@ class SemanticRetryFakeLLM(FakeLLM):
         return super().complete(system, user, response_model)
 
 
+class ReplanReviewFakeLLM(FakeLLM):
+    """The review identifies a candidate contract that source cannot satisfy."""
+
+    supports_implementation_review = True
+
+    def complete(self, system: str, user: str, response_model):  # type: ignore[no-untyped-def]
+        if response_model is ImplementationReviewArtifact:
+            return ImplementationReviewArtifact(
+                passed=False,
+                decision="replan",
+                replan_required=True,
+                summary="the candidate asks source code to report a private score",
+                issues=["move the private-score comparison to the controller"],
+                candidate_adjustments=[
+                    "remove the private-score output invariant",
+                    "retain only prediction validity and public validation checks",
+                ],
+            )
+        return super().complete(system, user, response_model)
+
+
+class ReplanThenPassFakeLLM(FakeLLM):
+    supports_implementation_review = True
+
+    def __init__(self) -> None:
+        self.proposal_calls = 0
+        self.review_calls = 0
+
+    def complete(self, system: str, user: str, response_model):  # type: ignore[no-untyped-def]
+        if response_model is CandidateProposalArtifact:
+            self.proposal_calls += 1
+            if self.proposal_calls == 2:
+                assert "remove the private-score output invariant" in user
+            required_invariant = (
+                "solution code reports the private score"
+                if self.proposal_calls == 1
+                else "solution code writes valid predictions"
+            )
+            return CandidateProposalArtifact(
+                candidates=[
+                    ChangeRequestArtifact(
+                        title="write toy solution",
+                        mutation_class=MutationClass.IMPLEMENTATION,
+                        research_question="can a generated program complete the task?",
+                        allowed_files=["solution.py"],
+                        required_invariants=[required_invariant],
+                        expected_gain=0.1,
+                        information_gain=0.5,
+                        estimated_seconds=10,
+                        failure_risk=0.1,
+                        rationale="establishes a runnable baseline",
+                        method=MethodDescriptor(
+                            family="toy",
+                            components={
+                                "predictor": (
+                                    "constant with private-score reporting"
+                                    if self.proposal_calls == 1
+                                    else "constant with prediction-only output"
+                                )
+                            },
+                            changed_factors=["implementation"],
+                        ),
+                    )
+                ]
+            )
+        if response_model is ImplementationReviewArtifact:
+            self.review_calls += 1
+            if self.review_calls == 1:
+                return ImplementationReviewArtifact(
+                    passed=False,
+                    decision="replan",
+                    replan_required=True,
+                    summary="private score is unavailable to solution code",
+                    candidate_adjustments=["remove the private-score output invariant"],
+                )
+            return ImplementationReviewArtifact(
+                passed=True, decision="pass", summary="candidate is executable"
+            )
+        return super().complete(system, user, response_model)
+
+
+class AssessmentFailureFakeLLM(FakeLLM):
+    def complete(self, system: str, user: str, response_model):  # type: ignore[no-untyped-def]
+        if response_model is AssessmentArtifact:
+            raise RuntimeError("assessment provider is unavailable")
+        return super().complete(system, user, response_model)
+
+
 class PreflightRepairingFakeLLM(FakeLLM):
     """The first plan targets an existing file with create; repair must recover it."""
 
@@ -1082,6 +1196,143 @@ def test_semantic_review_retries_until_recovery_succeeds(tmp_path: Path) -> None
     assert llm.review_calls == 5
     assert llm.code_plan_calls == 5
     assert llm.seen_markers == [0, 1, 2, 3]
+
+
+def test_review_replans_unsatisfiable_candidate_without_repair_loop(tmp_path: Path) -> None:
+    template = tmp_path / "template"
+    template.mkdir()
+    (template / "evaluate.py").write_text(
+        "import json\njson.dump({'score': 0.8}, open('metrics.json', 'w', encoding='utf-8'))\n",
+        encoding="utf-8",
+    )
+    contract = TaskContract(
+        task_id="replan-review-toy",
+        description="toy",
+        workspace_template=str(template),
+        allowed_data_paths=[],
+        solution_entrypoint="solution.py",
+        run_command=[sys.executable, "solution.py"],
+        evaluation_command=[sys.executable, "evaluate.py"],
+        metric_name="score",
+        required_outputs=["predictions.csv"],
+        timeout_seconds=30,
+        protected_paths=["evaluate.py", "metrics.json"],
+    )
+    result = MethodTrail(tmp_path / "project", ReplanReviewFakeLLM()).run_iteration(
+        contract, remaining_seconds=120
+    )
+    assert not result.completed_research
+    assert result.assessment is None
+    assert result.resume_mode == "replan"
+    assert result.run is not None and result.run.return_code == -8
+
+
+def test_replanned_candidate_runs_in_same_research_round(tmp_path: Path) -> None:
+    template = tmp_path / "template"
+    template.mkdir()
+    (template / "evaluate.py").write_text(
+        "import json\njson.dump({'score': 0.8}, open('metrics.json', 'w', encoding='utf-8'))\n",
+        encoding="utf-8",
+    )
+    contract = TaskContract(
+        task_id="replanned-candidate-toy",
+        description="toy",
+        workspace_template=str(template),
+        allowed_data_paths=[],
+        solution_entrypoint="solution.py",
+        run_command=[sys.executable, "solution.py"],
+        evaluation_command=[sys.executable, "evaluate.py"],
+        metric_name="score",
+        required_outputs=["predictions.csv"],
+        timeout_seconds=30,
+        protected_paths=["evaluate.py", "metrics.json"],
+    )
+    llm = ReplanThenPassFakeLLM()
+    trail = MethodTrail(tmp_path / "project", llm)
+    results = trail.run_research(contract, total_seconds=120, max_iterations=1)
+    assert len(results) == 2
+    assert [result.completed_research for result in results] == [False, True]
+    assert [result.iteration for result in results] == [1, 1]
+    assert results[-1].run is not None and results[-1].run.metric == 0.8
+    assert llm.proposal_calls == llm.review_calls == 2
+    assert sorted(
+        node.get("status")
+        for _, node in trail.graph.graph.nodes(data=True)
+        if node.get("node_type") == "proposal"
+    ) == ["adopted_outcome", "replan_rejected"]
+    revision_edges = [
+        (source, target)
+        for source, target, edge in trail.graph.graph.edges(data=True)
+        if edge.get("edge_type") == "replan"
+    ]
+    assert len(revision_edges) == 1
+    assert trail.graph.graph.nodes[revision_edges[0][0]]["status"] == "replan_rejected"
+    assert trail.graph.graph.nodes[revision_edges[0][1]]["status"] == "adopted_outcome"
+
+
+def test_repeated_unsatisfiable_candidate_stops_without_loop(tmp_path: Path) -> None:
+    template = tmp_path / "template"
+    template.mkdir()
+    contract = TaskContract(
+        task_id="replan-repeat-toy",
+        description="toy",
+        workspace_template=str(template),
+        allowed_data_paths=[],
+        run_command=[sys.executable, "solution.py"],
+        metric_name="score",
+        required_outputs=["predictions.csv"],
+    )
+    trail = MethodTrail(tmp_path / "project", ReplanReviewFakeLLM())
+    results = trail.run_research(contract, total_seconds=120, max_iterations=1)
+    assert len(results) == 1
+    assert not results[0].completed_research
+    assert trail.project is not None and trail.session is not None
+    stop_events = [
+        event
+        for event in trail.projects.events(trail.project, trail.session.session_id)
+        if event["kind"] == "research_stop"
+    ]
+    assert len(stop_events) == 1
+    assert "no new or revisitable executable node" in stop_events[0]["payload"]["reason"]
+
+
+def test_valid_metric_survives_assessment_provider_failure(tmp_path: Path) -> None:
+    template = tmp_path / "template"
+    template.mkdir()
+    (template / "evaluate.py").write_text(
+        "import json\njson.dump({'score': 0.8}, open('metrics.json', 'w', encoding='utf-8'))\n",
+        encoding="utf-8",
+    )
+    contract = TaskContract(
+        task_id="assessment-outage-toy",
+        description="toy",
+        workspace_template=str(template),
+        allowed_data_paths=[],
+        run_command=[sys.executable, "solution.py"],
+        evaluation_command=[sys.executable, "evaluate.py"],
+        metric_name="score",
+        required_outputs=["predictions.csv"],
+        protected_paths=["evaluate.py", "metrics.json"],
+    )
+    trail = MethodTrail(tmp_path / "project", AssessmentFailureFakeLLM())
+    try:
+        trail.run_iteration(contract, remaining_seconds=120)
+    except RuntimeError as error:
+        assert "assessment provider" in str(error)
+    else:
+        raise AssertionError("assessment provider failure should remain visible")
+    assert trail.project is not None and trail.session is not None
+    assert trail.project.incumbent_metric == 0.8
+    assert trail.session.status == "interrupted"
+    assert any(
+        node.get("metric") == 0.8
+        for _, node in trail.graph.graph.nodes(data=True)
+        if node.get("node_type") == "outcome"
+    )
+    assert any(
+        node.get("metric") == 0.8
+        for node in trail.experiment_memory.graph.nodes.values()
+    )
 
 
 def test_orchestrator_runs_a_full_adopted_iteration(tmp_path: Path) -> None:
@@ -1278,6 +1529,8 @@ def test_private_evaluator_keeps_labels_out_of_public_workspace(tmp_path: Path) 
     assert "private_evaluator_dir" not in public_context
     assert "private_evaluation_command" not in public_context
     assert str(private) not in str(public_context)
+    assert "independent evaluator" in public_context["metric_boundary"]
+    assert "unavailable to solution code" in public_context["metric_boundary"]
     result = Executor().run(public, contract)
     assert result.return_code == 0
     assert result.metric == 0.9

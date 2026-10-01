@@ -93,8 +93,17 @@ Its internal loop is:
 The review is a separate typed agent transition, even when it uses the same
 provider. It sees the realized diff rather than the proposed plan and checks
 the selected research question, declared invariants, comparison target, and
-output interface. A rejected patch enters the technical repair loop and does
-not become a measured research result or consume a research round. This gate
+output interface. Its typed outcome is pass, repair, or replan. Repair means
+the candidate contract is coherent but the applied code must change; the
+Recovery and Coding Agents receive specific issues and inspect the latest
+workspace before another local edit. Replan means the candidate's own
+declarations cannot be satisfied by source edits, such as a requirement to
+report a private evaluator score from inside solution code or mutually
+contradictory invariants. The review supplies concrete candidate adjustments;
+Method Graph proposes another executable candidate under the same research
+question and records a directed revision edge from the rejected proposal.
+An exact repeat of the rejected contract is ineligible. Neither transition
+becomes measured research evidence or consumes a research round. This gate
 complements the deterministic verifier: the verifier can prove syntax,
 dependencies, and required output paths, while the review checks whether the
 implementation still means what the hypothesis says.
@@ -396,9 +405,12 @@ hypothesis, similar past repairs, and (for a semantic review failure) the
 typed `ImplementationReviewArtifact` with failed checks and concrete issues.
 The Repair Agent must answer that checklist with local edits before the patch
 is reviewed again. It must inspect the latest workspace after every applied patch;
-an earlier failed plan is not a source of truth for the next plan. It returns one
-of three actions:
-`continue_repair`, `switch_implementation`, or `abandon_candidate`. The
+an earlier failed plan is not a source of truth for the next plan. It returns
+`continue_repair`, `switch_implementation`, or `abandon_candidate` for
+technical failures. The implementation reviewer can instead return
+`replan_candidate` when the selected candidate contract itself is impossible;
+the controller returns to method selection with review feedback rather than
+asking for another code patch. The
 controller allows a large technical-step safety cap (`max_repair_steps`,
 default 100). Repeated review failures alone never abandon a candidate;
 `abandon_candidate` must be an explicit Recovery Agent decision supported by a

@@ -1,4 +1,4 @@
-"""Fixed no-agent comparator for the accepted word+character representation."""
+"""Fixed no-agent word+character TF-IDF baseline for the insults task."""
 
 from pathlib import Path
 
@@ -11,8 +11,6 @@ ROOT = Path(__file__).parent
 task = ROOT / "task"
 train = pd.read_csv(task / "train.csv")
 test = pd.read_csv(task / "test.csv")
-sample = pd.read_csv(task / "sample_submission.csv")
-labels = train["author"].astype(str)
 
 features = FeatureUnion(
     [
@@ -38,14 +36,13 @@ features = FeatureUnion(
         ),
     ]
 )
-train_features = features.fit_transform(train["text"].fillna("").astype(str))
-test_features = features.transform(test["text"].fillna("").astype(str))
-model = LogisticRegression(C=4.0, max_iter=1000, solver="lbfgs", random_state=42)
-model.fit(train_features, labels)
-probabilities = model.predict_proba(test_features)
-classes = list(model.classes_)
-output = pd.DataFrame({"id": test["id"]})
-for label in ["EAP", "HPL", "MWS"]:
-    output[label] = probabilities[:, classes.index(label)]
-output.to_csv(ROOT / "baseline_combined_predictions.csv", index=False)
+train_features = features.fit_transform(train["Comment"].fillna("").astype(str))
+test_features = features.transform(test["Comment"].fillna("").astype(str))
+model = LogisticRegression(C=4.0, max_iter=1000, solver="liblinear", random_state=42)
+model.fit(train_features, train["Insult"].astype(int))
+probabilities = model.predict_proba(test_features)[:, 1]
+output = test.copy()
+output["Insult"] = probabilities
+output = output[["Insult", "Date", "Comment"]]
+output.to_csv(ROOT / "baseline_predictions.csv", index=False)
 print(f"wrote {len(output)} fixed word+character predictions")

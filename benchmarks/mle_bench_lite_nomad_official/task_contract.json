@@ -1,0 +1,20 @@
+{
+  "task_id": "mle-bench-lite-nomad2018-csv",
+  "description": "Train a tabular multi-output regressor from train.csv and produce predictions.csv for test.csv. The independent evaluator computes mean-column-wise RMSLE for formation energy and bandgap.",
+  "workspace_template": "./task",
+  "allowed_data_paths": ["train.csv", "test.csv", "sample_submission.csv"],
+  "solution_entrypoint": "solution.py",
+  "run_command": ["python", "solution.py"],
+  "private_evaluator_dir": "./private_evaluator",
+  "private_evaluation_command": ["python", "evaluate.py"],
+  "metric_file": "metrics.json",
+  "required_outputs": ["predictions.csv"],
+  "metric_name": "mean_columnwise_rmsle",
+  "maximize_metric": false,
+  "timeout_seconds": 300,
+  "max_repair_steps": 100,
+  "minimum_iterations": 3,
+  "allowed_dependencies": ["numpy", "pandas", "scikit-learn"],
+  "editable_paths": ["solution.py"],
+  "protected_paths": ["train.csv", "test.csv", "sample_submission.csv", "metrics.json"]
+}

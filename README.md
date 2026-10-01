@@ -57,14 +57,21 @@ Candidate estimates begin with the LLM's expected gain, information value, runti
 
 Every applied patch passes two gates before a full run: deterministic workspace
 checks (edit scope, Python syntax, imports, and task interfaces) and an
-implementation review that reads the actual diff. A review failure is handled
-as structured feedback to the Recovery and Coding Agents. The same candidate
-continues through the repair loop until the Recovery Agent explicitly declares
-it technically impossible, the shared time budget ends, or the large
-`max_repair_steps` safety cap is reached. It does not count as a research round.
-Metric
-assessment remains separate; a patch can satisfy its stated invariants and
-still be rejected by the independent evaluator.
+implementation review that reads the actual diff. The review returns pass,
+repair, or replan. A source-level mistake sends concrete feedback to Recovery
+and Coding, which keep repairing the same candidate until it works, the
+Recovery Agent diagnoses technical impossibility, or the shared budget or
+large technical-step safety cap is reached. If the candidate's own invariants
+or method description are contradictory or require information unavailable
+to solution code, replan sends the same research question back to Method
+Graph selection with specific candidate adjustments. The rejected proposal
+and revision edge remain visible; an exact repeat is ineligible, so it cannot
+start another identical repair cycle. Neither repair nor replan consumes a
+research round. Metric assessment remains separate; a patch can satisfy its
+stated invariants and still score poorly in the independent evaluator. If that
+evaluator has already produced a valid score and a later assessment-agent
+call fails, the controller records the measured fact and preserves the best
+valid version without inventing a causal conclusion.
 
 Agent prompts use a bounded context pack rather than serializing the complete
 artifact database. Graph rows retain IDs, directed parent/edge meaning, method

@@ -136,6 +136,17 @@ class ExperimentPathGraph:
             )
             proposal_id = f"proposal-{iteration}-{index}-{uuid.uuid4().hex[:8]}"
             signature = method_signature(change)
+            rejected_sources = [
+                node_id
+                for node_id, data in self.graph.nodes(data=True)
+                if data.get("node_type") == "proposal"
+                and data.get("status") == "replan_rejected"
+                and data.get("iteration") == iteration
+                and (
+                    data.get("method_signature") == signature
+                    or data.get("question") == change.research_question
+                )
+            ]
             # A method node is global to the project.  Do not create a second
             # executable node for an identical method; the existing node stays
             # available as history and can be revisited when new evidence
@@ -143,6 +154,11 @@ class ExperimentPathGraph:
             if any(
                 data.get("method_signature") == signature
                 and data.get("node_type") in {"proposal", "outcome"}
+                and (
+                    data.get("status") != "replan_rejected"
+                    or data.get("change_request", {}).get("required_invariants")
+                    == change.required_invariants
+                )
                 for _, data in self.graph.nodes(data=True)
             ):
                 continue
@@ -200,6 +216,18 @@ class ExperimentPathGraph:
                     target_change=self._change_payload(proposal_id),
                 )
             attached.append((proposal_id, change))
+            for rejected_id in rejected_sources:
+                rejected = self.graph.nodes[rejected_id]
+                self.graph.add_edge(
+                    rejected_id,
+                    proposal_id,
+                    relation="revises_candidate",
+                    status="proposed",
+                    edge_type="replan",
+                    label="revises_candidate",
+                    reason=str(rejected.get("replan_reason") or "候选约束经过审查后修订。"),
+                    target_change=self._change_payload(proposal_id),
+                )
             for evidence_id in change.evidence_parent_ids:
                 if evidence_id not in self.graph:
                     continue
@@ -295,7 +323,7 @@ class ExperimentPathGraph:
             return
         if self.graph.has_edge(source, target):
             edge = self.graph.edges[source, target]
-            if edge.get("edge_type") in {"lineage", "candidate", "execution"}:
+            if edge.get("edge_type") in {"lineage", "candidate", "execution", "replan"}:
                 return
             edge["relation"] = relation
             edge["weight"] = max(float(edge.get("weight", 0.0)), round(weight, 4))
@@ -440,6 +468,15 @@ class ExperimentPathGraph:
     def mark_proposal_selected(self, proposal_id: str) -> None:
         if proposal_id in self.graph:
             self.graph.nodes[proposal_id]["status"] = "selected"
+            self._save()
+
+    def mark_proposal_replan_rejected(
+        self, proposal_id: str, reason: str, adjustments: list[str]
+    ) -> None:
+        if proposal_id in self.graph:
+            self.graph.nodes[proposal_id]["status"] = "replan_rejected"
+            self.graph.nodes[proposal_id]["replan_reason"] = reason
+            self.graph.nodes[proposal_id]["candidate_adjustments"] = adjustments
             self._save()
 
     def record_outcome(self, proposal_id: str, variant_id: str, status: str) -> None:
@@ -1217,7 +1254,15 @@ def candidate_coverage_gap(
         )
         for change in items
     )
-    if has_orthogonal or any(_looks_like_composition(change) for change in items):
+    # A composition already measured in the recent family is another local
+    # retest, not a new search direction. Otherwise repeated blend-weight and
+    # fold checks can satisfy the coverage guard indefinitely.
+    has_new_composition = any(
+        _looks_like_composition(change)
+        and change.method.family not in recent_families
+        for change in items
+    )
+    if has_orthogonal or has_new_composition:
         return None
     return (
         "The last measured candidates contain at least two non-improving outcomes and the current batch repeats their method families and changed factors. Add one executable orthogonal-family or composition challenger, while retaining at most one controlled local refinement."

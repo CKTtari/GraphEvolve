@@ -6,6 +6,16 @@ methodtrail_state/
 **/prepared/
 **/baseline_run*/
 **/task_*/
+cache/
+no-use/
+benchmarks/mle_bench_lite_*/task/
+benchmarks/mle_bench_lite_*/raw/
+benchmarks/mle_bench_lite_*/raw*.csv
+benchmarks/mle_bench_lite_*/data/
+benchmarks/mle_bench_lite_*/accepted/
+benchmarks/mle_bench_lite_*/private_evaluator/*.csv
+benchmarks/mle_bench_lite_*/private_evaluator/metrics.json
+benchmarks/mle_bench_lite_*/baseline*predictions.csv
 
 # Local caches and Python build output
 .pytest_cache/
