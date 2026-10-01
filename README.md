@@ -66,7 +66,9 @@ or method description are contradictory or require information unavailable
 to solution code, replan sends the same research question back to Method
 Graph selection with specific candidate adjustments. The rejected proposal
 and revision edge remain visible; an exact repeat is ineligible, so it cannot
-start another identical repair cycle. Neither repair nor replan consumes a
+start another identical repair cycle. A separate configurable consecutive
+replan cap stops a sequence of differently worded infeasible contracts; it
+does not limit ordinary code repair. Neither repair nor replan consumes a
 research round. Metric assessment remains separate; a patch can satisfy its
 stated invariants and still score poorly in the independent evaluator. If that
 evaluator has already produced a valid score and a later assessment-agent

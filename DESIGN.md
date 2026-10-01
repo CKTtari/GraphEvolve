@@ -102,8 +102,11 @@ report a private evaluator score from inside solution code or mutually
 contradictory invariants. The review supplies concrete candidate adjustments;
 Method Graph proposes another executable candidate under the same research
 question and records a directed revision edge from the rejected proposal.
-An exact repeat of the rejected contract is ineligible. Neither transition
-becomes measured research evidence or consumes a research round. This gate
+An exact repeat of the rejected contract is ineligible. A configurable
+consecutive replan cap also stops differently worded infeasible contracts
+after repeated failure to produce a measured run; it is separate from the
+larger technical repair cap. Neither transition becomes measured research
+evidence or consumes a research round. This gate
 complements the deterministic verifier: the verifier can prove syntax,
 dependencies, and required output paths, while the review checks whether the
 implementation still means what the hypothesis says.

@@ -61,6 +61,10 @@ class TaskContract(BaseModel):
     # number of research rounds.  The large safety cap prevents a broken
     # adapter from spinning forever; RecoveryAgent can stop much earlier.
     max_repair_steps: int = Field(default=100, ge=1, le=1000)
+    # Candidate-contract replanning is separate from code repair. Bound
+    # consecutive unmeasured replans so paraphrased impossible requirements
+    # cannot consume the entire session without a research result.
+    max_replan_steps: int = Field(default=8, ge=1, le=100)
     # Kept for contract compatibility. Semantic review failures no longer
     # auto-abandon a candidate; RecoveryAgent must explicitly choose that
     # action. The hard repair-step and shared-time limits remain safety guards.
@@ -92,6 +96,7 @@ class TaskContract(BaseModel):
                 "private_evaluator_dir",
                 "private_evaluation_command",
                 "max_repair_steps",
+                "max_replan_steps",
                 "max_semantic_review_retries",
                 "max_repair_attempts",
                 "search_policy",

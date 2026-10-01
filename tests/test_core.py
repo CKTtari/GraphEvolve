@@ -1021,6 +1021,32 @@ class ReplanReviewFakeLLM(FakeLLM):
         return super().complete(system, user, response_model)
 
 
+class ChurningReplanFakeLLM(ReplanReviewFakeLLM):
+    """Paraphrased infeasible contracts must not consume the whole run budget."""
+
+    def __init__(self) -> None:
+        self.proposal_calls = 0
+
+    def complete(self, system: str, user: str, response_model):  # type: ignore[no-untyped-def]
+        proposal = super().complete(system, user, response_model)
+        if response_model is not CandidateProposalArtifact:
+            return proposal
+        self.proposal_calls += 1
+        change = proposal.candidates[0].model_copy(
+            update={
+                "required_invariants": [
+                    f"solution reports private score using strategy {self.proposal_calls}"
+                ],
+                "method": MethodDescriptor(
+                    family="toy",
+                    components={"predictor": f"strategy {self.proposal_calls}"},
+                    changed_factors=["implementation"],
+                ),
+            }
+        )
+        return proposal.model_copy(update={"candidates": [change]})
+
+
 class ReplanThenPassFakeLLM(FakeLLM):
     supports_implementation_review = True
 
@@ -1294,6 +1320,35 @@ def test_repeated_unsatisfiable_candidate_stops_without_loop(tmp_path: Path) -> 
     ]
     assert len(stop_events) == 1
     assert "no new or revisitable executable node" in stop_events[0]["payload"]["reason"]
+
+
+def test_distinct_unsatisfiable_replans_hit_separate_safety_cap(tmp_path: Path) -> None:
+    template = tmp_path / "template"
+    template.mkdir()
+    contract = TaskContract(
+        task_id="replan-churn-toy",
+        description="toy",
+        workspace_template=str(template),
+        allowed_data_paths=[],
+        run_command=[sys.executable, "solution.py"],
+        metric_name="score",
+        required_outputs=["predictions.csv"],
+        max_replan_steps=3,
+        max_repair_steps=100,
+    )
+    llm = ChurningReplanFakeLLM()
+    trail = MethodTrail(tmp_path / "project", llm)
+    results = trail.run_research(contract, total_seconds=120, max_iterations=1)
+    assert len(results) == llm.proposal_calls == 3
+    assert all(result.resume_mode == "replan" for result in results)
+    assert all(result.iteration == 1 and not result.completed_research for result in results)
+    assert trail.project is not None and trail.session is not None
+    stop_events = [
+        event
+        for event in trail.projects.events(trail.project, trail.session.session_id)
+        if event["kind"] == "research_stop"
+    ]
+    assert stop_events[-1]["payload"]["consecutive_replans"] == 3
 
 
 def test_valid_metric_survives_assessment_provider_failure(tmp_path: Path) -> None:

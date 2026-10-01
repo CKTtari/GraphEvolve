@@ -1015,6 +1015,7 @@ class MethodTrail:
         current_parent = parent_variant_id
         results: list[IterationResult] = []
         completed_rounds = 0
+        consecutive_replans = 0
         consecutive_non_improving = (
             self.session.consecutive_non_improving if self.session is not None else 0
         )
@@ -1080,7 +1081,26 @@ class MethodTrail:
             # planning, code editing and execution—not only the Python process.
             elapsed = max(1, int(time.monotonic() - iteration_started))
             remaining_seconds -= elapsed
+            if result.resume_mode == "replan":
+                consecutive_replans += 1
+                if consecutive_replans >= contract.max_replan_steps:
+                    if self.project is not None and self.session is not None:
+                        self.projects.append_event(
+                            self.project,
+                            self.session.session_id,
+                            "research_stop",
+                            {
+                                "reason": (
+                                    "candidate contracts remained infeasible after "
+                                    f"{consecutive_replans} consecutive replans"
+                                ),
+                                "completed_rounds": completed_rounds,
+                                "consecutive_replans": consecutive_replans,
+                            },
+                        )
+                    break
             if result.completed_research:
+                consecutive_replans = 0
                 completed_rounds += 1
                 measured = result.run.metric if result.run else None
                 if measured is not None and incumbent_before is not None:
