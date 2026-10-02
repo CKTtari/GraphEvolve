@@ -70,6 +70,20 @@ class NoExecutableCandidate(RuntimeError):
     """Raised when discovery only repeats candidates that were already rejected."""
 
 
+def _metric_deteriorated(
+    previous: float | None,
+    current: float | None,
+    maximize_metric: bool,
+) -> bool:
+    """Return whether the current result is strictly worse than the prior one."""
+
+    if previous is None or current is None:
+        return False
+    # A maximize metric deteriorates when it decreases; a minimize metric
+    # deteriorates when it increases. Equality is not deterioration.
+    return current < previous if maximize_metric else current > previous
+
+
 def _failure_signature(run: RunArtifact) -> str:
     """Identify the root error, ignoring changing traceback paths and lines."""
 
@@ -719,9 +733,8 @@ class MethodTrail:
             self.session,
             status="interrupted",
             current_variant_id=self.project.incumbent_variant_id,
-            consecutive_non_improving=(
-                0 if adopted else self.session.consecutive_non_improving + 1
-            ),
+            consecutive_deteriorating=0,
+            last_metric=run.metric,
         )
         self.projects.append_event(
             self.project,
@@ -1016,9 +1029,10 @@ class MethodTrail:
         results: list[IterationResult] = []
         completed_rounds = 0
         consecutive_replans = 0
-        consecutive_non_improving = (
-            self.session.consecutive_non_improving if self.session is not None else 0
+        consecutive_deteriorating = (
+            self.session.consecutive_deteriorating if self.session is not None else 0
         )
+        previous_metric = self.session.last_metric if self.session is not None else None
         while completed_rounds < max_iterations:
             if remaining_seconds <= self._budget_reserve(contract, remaining_seconds):
                 if self.project is not None and self.session is not None:
@@ -1037,7 +1051,6 @@ class MethodTrail:
                 break
             iteration_started = time.monotonic()
             try:
-                incumbent_before = self.project.incumbent_metric if self.project else None
                 result = self.run_iteration(
                     contract,
                     remaining_seconds=remaining_seconds,
@@ -1072,7 +1085,7 @@ class MethodTrail:
                         {
                             "reason": str(exc),
                             "completed_rounds": completed_rounds,
-                            "consecutive_non_improving": consecutive_non_improving,
+                            "consecutive_deteriorating": consecutive_deteriorating,
                         },
                     )
                 break
@@ -1103,25 +1116,25 @@ class MethodTrail:
                 consecutive_replans = 0
                 completed_rounds += 1
                 measured = result.run.metric if result.run else None
-                if measured is not None and incumbent_before is not None:
-                    improved = (
-                        measured > incumbent_before
-                        if contract.maximize_metric
-                        else measured < incumbent_before
+                prior_metric = previous_metric
+                if measured is not None:
+                    deteriorated = _metric_deteriorated(
+                        previous_metric, measured, contract.maximize_metric
                     )
-                    consecutive_non_improving = 0 if improved else consecutive_non_improving + 1
-                elif measured is not None:
-                    # The first valid measurement establishes the reference.
-                    consecutive_non_improving = 0
+                    consecutive_deteriorating = (
+                        consecutive_deteriorating + 1 if deteriorated else 0
+                    )
+                    previous_metric = measured
                 if self.project is not None and self.session is not None:
                     self.projects.update_session(
                         self.project,
                         self.session,
-                        consecutive_non_improving=consecutive_non_improving,
+                        consecutive_deteriorating=consecutive_deteriorating,
+                        last_metric=measured,
                     )
                 if (
                     completed_rounds >= contract.minimum_iterations
-                    and consecutive_non_improving >= 4
+                    and consecutive_deteriorating >= 4
                 ):
                     if self.project is not None and self.session is not None:
                         self.projects.append_event(
@@ -1129,9 +1142,13 @@ class MethodTrail:
                             self.session.session_id,
                             "research_stop",
                             {
-                                "reason": "four consecutive completed rounds without improving the incumbent",
+                                "reason": (
+                                    "four consecutive completed rounds deteriorated "
+                                    "relative to the immediately preceding completed round"
+                                ),
                                 "completed_rounds": completed_rounds,
-                                "consecutive_non_improving": consecutive_non_improving,
+                                "consecutive_deteriorating": consecutive_deteriorating,
+                                "previous_metric": prior_metric,
                                 "metric": measured,
                             },
                         )

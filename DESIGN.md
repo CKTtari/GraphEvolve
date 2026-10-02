@@ -528,10 +528,15 @@ the system can adopt and remember a result, keep a promising or incomplete
 branch for more evidence, expand the method graph, or stop.
 
 The multi-round runner allows up to 20 completed research rounds by default. It
-also stops after four consecutive completed rounds fail to improve the current
-incumbent, in addition to an Agent `stop` decision or exhausted time budget.
-Technical repair attempts can repeat inside one round and do not consume the
-research-round count. The `dashboard` command writes an offline HTML view of
+also stops after four consecutive completed rounds are strictly worse than the
+immediately preceding completed round, using the task's metric direction
+(decrease is deterioration for a maximize metric; increase is deterioration for
+a minimize metric). A tie resets this counter, as does any improvement. This
+is separate from path-priority penalties for methods with repeated
+non-improving evidence. An Agent `stop` decision or exhausted time budget can
+also stop the run. Technical repair attempts can repeat inside one round and
+do not consume the research-round count. The `dashboard` command writes an
+offline HTML view of
 the method graph, experiment-memory graph, round filter, directed edge labels,
 node/edge change details, and trajectory events.
 

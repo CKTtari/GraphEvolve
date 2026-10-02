@@ -47,7 +47,11 @@ class SessionRecord:
     updated_at: str
     current_variant_id: str | None = None
     next_question: str | None = None
+    # Deprecated compatibility field.  New stopping logic uses the
+    # direction-aware deterioration counter below.
     consecutive_non_improving: int = 0
+    consecutive_deteriorating: int = 0
+    last_metric: float | None = None
 
 
 @dataclass
@@ -324,6 +328,8 @@ class ProjectManager:
         current_variant_id: str | None = None,
         next_question: str | None = None,
         consecutive_non_improving: int | None = None,
+        consecutive_deteriorating: int | None = None,
+        last_metric: float | None = None,
         handoff: str | None = None,
     ) -> SessionRecord:
         if status is not None:
@@ -334,6 +340,10 @@ class ProjectManager:
             session.next_question = next_question
         if consecutive_non_improving is not None:
             session.consecutive_non_improving = consecutive_non_improving
+        if consecutive_deteriorating is not None:
+            session.consecutive_deteriorating = consecutive_deteriorating
+        if last_metric is not None:
+            session.last_metric = last_metric
         session.updated_at = _now()
         session_dir = self._session_dir(project, session.session_id)
         self._write_json(session_dir / "session.json", asdict(session))

@@ -8,7 +8,7 @@ from methodtrail.artifacts import ArtifactStore
 from methodtrail.execution import Executor, Verifier
 from methodtrail.llm import LLMDeadlineExceeded
 from methodtrail.memory import BugMemory, ExperimentMemory, MemoryCard
-from methodtrail.orchestrator import MethodTrail
+from methodtrail.orchestrator import MethodTrail, _metric_deteriorated
 from methodtrail.path_graph import ExperimentPathGraph, candidate_coverage_gap
 from methodtrail.project import ProjectManager
 from methodtrail.repository import RepoMap
@@ -150,6 +150,18 @@ def test_path_graph_marks_candidates_that_cannot_fit_tail_budget(tmp_path: Path)
     assert signal["feasible"] is False
     assert signal["required_seconds"] == 30
     assert graph.rank([candidate], 25, ValueWeights(), reserve_seconds=10)[0][1] == float("-inf")
+
+
+def test_deterioration_is_strict_and_direction_aware() -> None:
+    # For a maximize metric, a lower score is deterioration.
+    assert _metric_deteriorated(0.8, 0.7, True)
+    assert not _metric_deteriorated(0.8, 0.8, True)
+    assert not _metric_deteriorated(0.8, 0.9, True)
+    # For a minimize metric, a higher loss is deterioration.
+    assert _metric_deteriorated(0.3, 0.4, False)
+    assert not _metric_deteriorated(0.3, 0.3, False)
+    assert not _metric_deteriorated(0.3, 0.2, False)
+    assert not _metric_deteriorated(None, 0.4, False)
 
 
 def test_initial_candidate_coverage_requires_a_composition_challenger() -> None:
