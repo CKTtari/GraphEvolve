@@ -75,3 +75,39 @@ improvement to 0.37690. Future runs now count only strict, direction-aware
 round-to-round deterioration, so that pattern will reset the deterioration
 counter and allow further exploration. Reaching the v6 path still needs a
 new run; it must not be claimed from the controller change alone.
+
+## Other design differences visible in the logs
+
+The stopping rule was not the only difference. The v6 run supplied a much
+denser evidence graph to later decisions: 12 of its 15 experiment cards had
+explicit `evidence_parent_ids`, compared with 2 of 6 cards in v9. The saved
+method graphs contain 118 evidence edges in v6 and 17 in v9. The current prompt
+allows an Agent to omit `evidence_parent_ids`, so a candidate can use several
+measured results in its reasoning while leaving no directed evidence links for
+the next Agent. This makes the graph structurally valid but semantically thin.
+
+The candidate-coverage guard also checks only for an initial composition
+challenger, or a later orthogonal family after repeated local failures. It does
+not require a different composition mechanism after a first composition has
+won. In v9 the first two measured methods were both word-character
+compositions, but the later executable pool did not contain the class-wise OOF
+stacking or BM25-style component-replacement directions that v6 actually
+measured.
+
+Candidate ranking reinforces this gap. An unmeasured family receives an
+information bonus, while the calibrated estimate only transfers evidence when
+relation, family, and changed-factor overlap are sufficiently close. A new
+composition mechanism therefore receives little measured support from an
+earlier successful composition unless the LLM proposes the connection itself.
+The v9 selector consequently spent rounds on a word-only control, a repeat of
+the incumbent through a cross-path mixture, and a character-only control.
+These were valid experiments, but they consumed the available rounds without
+opening the deeper composition path.
+
+Finally, v6 used paired repeatability rounds after each major gain: the stack,
+the ComplementNB replacement, and the BM25 replacement were each checked under
+another fold or convergence setting. v9 accepted the feature-fusion private
+improvement once and moved on; its public OOF loss (0.416634) did not agree
+closely with the private loss (0.376901), yet no repeatability branch was
+forced. This is an evidence-quality gap, separate from code execution or
+repair failure.
