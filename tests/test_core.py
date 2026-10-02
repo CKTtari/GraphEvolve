@@ -164,7 +164,7 @@ def test_deterioration_is_strict_and_direction_aware() -> None:
     assert not _metric_deteriorated(None, 0.4, False)
 
 
-def test_initial_candidate_coverage_requires_a_composition_challenger() -> None:
+def test_initial_candidate_coverage_requires_a_distinct_direction() -> None:
     word = ChangeRequestArtifact(
         title="word representation",
         mutation_class=MutationClass.IMPLEMENTATION,
@@ -180,8 +180,27 @@ def test_initial_candidate_coverage_requires_a_composition_challenger() -> None:
             ),
         }
     )
-    gap = candidate_coverage_gap([word, character], initial=True)
-    assert gap and "composition" in gap
+    assert candidate_coverage_gap([word, character], initial=True) is None
+    same_family_components = [
+        word.model_copy(
+            update={
+                "title": "another word representation",
+                "method": MethodDescriptor(
+                    family="word", components={"features": "word ngrams"}
+                ),
+            }
+        ),
+        word.model_copy(
+            update={
+                "title": "third word representation",
+                "method": MethodDescriptor(
+                    family="word", components={"features": "word ngrams"}
+                ),
+            }
+        ),
+    ]
+    gap = candidate_coverage_gap(same_family_components, initial=True)
+    assert gap and "distinct" in gap
     combined = word.model_copy(
         update={
             "title": "combined representations",
@@ -195,25 +214,23 @@ def test_initial_candidate_coverage_requires_a_composition_challenger() -> None:
         }
     )
     assert candidate_coverage_gap([word, character, combined], initial=True) is None
-    same_family_components = [
+    same_family_different_components = [
         word.model_copy(
             update={
                 "method": MethodDescriptor(
-                    family="tfidf",
-                    components={"view": "word"},
+                    family="tfidf", components={"view": "word"}
                 )
             }
         ),
         word.model_copy(
             update={
                 "method": MethodDescriptor(
-                    family="tfidf",
-                    components={"view": "character"},
+                    family="tfidf", components={"view": "character"}
                 )
             }
         ),
     ]
-    assert candidate_coverage_gap(same_family_components, initial=True)
+    assert candidate_coverage_gap(same_family_different_components, initial=True) is None
 
 
 def test_composition_candidate_is_not_penalized_before_positive_history(tmp_path: Path) -> None:
@@ -614,6 +631,61 @@ def test_path_graph_blends_llm_estimate_with_measured_history(tmp_path: Path) ->
     calibrated = graph.calibrate(candidate)
     assert calibrated.expected_gain > candidate.expected_gain
     assert calibrated.estimated_seconds < candidate.estimated_seconds
+
+
+def test_path_graph_transfers_shared_factor_evidence_across_families(tmp_path: Path) -> None:
+    graph = ExperimentPathGraph(tmp_path / "graph.json")
+    graph.add_node(
+        PathNode(
+            variant_id="base",
+            title="probability blend",
+            mutation_class=MutationClass.COMPOSITION,
+            relation="combine",
+            question="blend components",
+            evidence_summary="measured",
+            metric=0.50,
+            status="adopted",
+            method=MethodDescriptor(
+                family="probability_blend",
+                components={"word": "word model", "character": "character model"},
+                changed_factors=["probability-level composition"],
+            ),
+        )
+    )
+    graph.add_node(
+        PathNode(
+            variant_id="stack",
+            title="stacked probabilities",
+            parent_variant_id="base",
+            relation="combine",
+            mutation_class=MutationClass.COMPOSITION,
+            question="stack components",
+            evidence_summary="measured",
+            metric=0.40,
+            status="adopted",
+            method=MethodDescriptor(
+                family="oof_stacking",
+                components={"word": "word model", "character": "character model"},
+                changed_factors=["probability-level composition", "OOF meta-model"],
+            ),
+        )
+    )
+    candidate = CandidatePath(
+        variant_id="new-stack",
+        title="new probability meta-model",
+        relation="combine",
+        expected_gain=0.01,
+        information_gain=0.1,
+        estimated_seconds=100,
+        failure_risk=0.2,
+        method=MethodDescriptor(
+            family="classwise_meta_model",
+            components={"word": "word model", "character": "character model"},
+            changed_factors=["probability-level composition"],
+        ),
+    )
+    calibrated = graph.calibrate(candidate, maximize_metric=False)
+    assert calibrated.expected_gain > candidate.expected_gain
 
 
 def test_path_graph_prefers_unmeasured_family_after_repeated_regressions(tmp_path: Path) -> None:

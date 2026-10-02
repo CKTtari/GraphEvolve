@@ -25,11 +25,11 @@ The LLM proposes experiments and edits. GraphEvolve ranks candidate paths, appli
 
 Each experiment declares a compact method description: method family, changed components, changed factors, and target scope. Before one candidate is executed, every proposed candidate is attached as a branch from the active version. The method graph tracks measured outcomes by family, gives an unmeasured family a small information preference, and lowers the priority of a family with repeated non-improvements. After repeated non-improvement it also penalizes candidates that only repeat the recent factors, while preserving information value for an unseen composition or orthogonal direction. A candidate must also fit the remaining runtime plus a finalization reserve before it can be selected.
 
-The initial proposal batch has one generic coverage guard: when it contains
-multiple distinct families or components but no composition challenger, the
-controller gives the same hypothesis one bounded revision pass. This prevents
-complementary components from being treated as mutually exclusive by default.
-The guard does not name a benchmark model or force a fixed candidate count.
+The initial proposal batch has one generic coverage guard: when it contains only
+one method family or component profile, the controller gives the same hypothesis
+one bounded revision pass to add a distinct executable direction. Composition is
+one possible direction, not a required predictor. The guard does not name a
+benchmark model or force a fixed candidate count.
 
 After execution, the branch is linked to its outcome. Measured facts, reusable conclusions, applicable conditions, and failures are retained separately. Later iterations retrieve a directed evidence pack rather than a flat recent log:
 

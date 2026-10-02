@@ -914,15 +914,8 @@ class ExperimentPathGraph:
         for node_id, data in self.graph.nodes(data=True):
             if data.get("node_type") != "outcome" or data.get("metric") is None:
                 continue
-            if data.get("relation") != candidate.relation:
-                continue
-            method = data.get("method") or {}
-            family = method.get("family", "unspecified")
-            if candidate.method.family != "unspecified" and family != candidate.method.family:
-                continue
-            changed = set(candidate.method.changed_factors)
-            historical_changed = set(method.get("changed_factors", []))
-            if changed and historical_changed and not changed.intersection(historical_changed):
+            similarity = _method_similarity(candidate, data)
+            if similarity <= 0.0:
                 continue
             parent_id = data.get("parent_variant_id")
             parent_metric = (
@@ -935,20 +928,39 @@ class ExperimentPathGraph:
                 gain = float(data["metric"]) - float(parent_metric)
                 if not maximize_metric:
                     gain = -gain
-            samples.append({"gain": gain, "failed": data.get("status") == "failed", "seconds": data.get("wall_seconds")})
+            samples.append(
+                {
+                    "gain": gain,
+                    "failed": data.get("status") == "failed",
+                    "seconds": data.get("wall_seconds"),
+                    "weight": similarity,
+                }
+            )
         if not samples:
             return candidate
 
-        usable_gains = [float(item["gain"]) for item in samples if item["gain"] is not None]
-        confidence = min(0.75, len(samples) / 4.0)
+        total_weight = sum(float(item["weight"]) for item in samples)
+        usable_gains = [item for item in samples if item["gain"] is not None]
+        confidence = min(0.75, total_weight / 4.0)
         expected_gain = (
-            sum(usable_gains) / len(usable_gains)
+            sum(float(item["gain"]) * float(item["weight"]) for item in usable_gains)
+            / sum(float(item["weight"]) for item in usable_gains)
             if usable_gains
             else candidate.expected_gain
         )
-        failure_rate = sum(bool(item["failed"]) for item in samples) / len(samples)
-        durations = [float(item["seconds"]) for item in samples if item["seconds"] is not None]
-        measured_seconds = sum(durations) / len(durations) if durations else candidate.estimated_seconds
+        failure_rate = (
+            sum(float(item["weight"]) for item in samples if item["failed"])
+            / total_weight
+            if total_weight
+            else 0.0
+        )
+        durations = [item for item in samples if item["seconds"] is not None]
+        measured_seconds = (
+            sum(float(item["seconds"]) * float(item["weight"]) for item in durations)
+            / sum(float(item["weight"]) for item in durations)
+            if durations
+            else candidate.estimated_seconds
+        )
         return candidate.model_copy(
             update={
                 "expected_gain": max(0.0, (1.0 - confidence) * candidate.expected_gain + confidence * max(0.0, expected_gain)),
@@ -1196,6 +1208,56 @@ def method_signature(change: ChangeRequestArtifact) -> str:
     )
 
 
+def _method_similarity(candidate: CandidatePath, outcome: dict[str, Any]) -> float:
+    """Score transferable evidence without requiring an identical family name.
+
+    A new method family can still be a meaningful continuation when it keeps a
+    component, changed factor, or compatible composition relation from a
+    measured method. Exact-family evidence is strongest; shared declared
+    ingredients provide a bounded, weaker signal. Unrelated methods contribute
+    nothing.
+    """
+
+    historical_method = MethodDescriptor.model_validate(outcome.get("method") or {})
+    candidate_factors = set(candidate.method.changed_factors)
+    historical_factors = set(historical_method.changed_factors)
+    factor_overlap = candidate_factors.intersection(historical_factors)
+    candidate_keys = set(candidate.method.components)
+    historical_keys = set(historical_method.components)
+    key_overlap = candidate_keys.intersection(historical_keys)
+    candidate_values = {
+        str(value).strip().lower()
+        for value in candidate.method.components.values()
+        if str(value).strip()
+    }
+    historical_values = {
+        str(value).strip().lower()
+        for value in historical_method.components.values()
+        if str(value).strip()
+    }
+    value_overlap = candidate_values.intersection(historical_values)
+    same_family = (
+        candidate.method.family != "unspecified"
+        and candidate.method.family == historical_method.family
+    )
+    relation = str(candidate.relation)
+    historical_relation = str(outcome.get("relation") or "")
+    compatible_relation = relation == historical_relation or (
+        relation in {"combine", "deepen"}
+        and historical_relation in {"combine", "deepen"}
+    )
+
+    if same_family and compatible_relation:
+        return 1.0
+    if factor_overlap and compatible_relation:
+        return 0.8
+    if (key_overlap or value_overlap) and compatible_relation:
+        return 0.65
+    if factor_overlap and _looks_like_composition(candidate) and _looks_like_method_metadata(outcome):
+        return 0.55
+    return 0.0
+
+
 def candidate_coverage_gap(
     changes: Iterable[ChangeRequestArtifact],
     *,
@@ -1205,15 +1267,17 @@ def candidate_coverage_gap(
     """Return a missing-search-direction warning before ranking candidates.
 
     This is intentionally task agnostic. It does not name a predictor or a
-    feature type; it notices either an initial batch with multiple distinct
-    families but no composition candidate, or a later batch that repeats recent
-    factors after non-improving outcomes. The orchestrator gives the same
-    research question one bounded revision pass instead of silently accepting a
-    narrow candidate batch.
+    feature type; it notices either an initial batch that is too narrow, or a
+    later batch that repeats recent factors after non-improving outcomes. The
+    orchestrator gives the same research question one bounded revision pass
+    instead of silently accepting a narrow candidate batch. Composition is a
+    possible direction, not a required one.
     """
 
     items = list(changes)
     if initial:
+        if len(items) <= 1:
+            return None
         families = {
             change.method.family
             for change in items
@@ -1224,14 +1288,13 @@ def candidate_coverage_gap(
             for change in items
             if change.method.components
         }
-        if len(families) < 2 and len(component_profiles) < 2:
-            return None
-        if any(_looks_like_composition(change) for change in items):
+        if len(families) >= 2 or len(component_profiles) >= 2:
             return None
         return (
-            "The initial batch covers multiple method families/components ("
-            + ", ".join(sorted(families))
-            + ") but contains no explicit composition/fusion challenger. Add one executable candidate that combines complementary components, while retaining independent controls."
+            "The initial candidate batch is too narrow: it covers only one "
+            "method family or component profile. Add at least one distinct, "
+            "genuinely different executable direction tied to the same research question; "
+            "composition is optional and must be justified by the task evidence."
         )
 
     recent = list(recent_outcomes or [])
@@ -1254,18 +1317,15 @@ def candidate_coverage_gap(
         )
         for change in items
     )
-    # A composition already measured in the recent family is another local
-    # retest, not a new search direction. Otherwise repeated blend-weight and
-    # fold checks can satisfy the coverage guard indefinitely.
-    has_new_composition = any(
-        _looks_like_composition(change)
-        and change.method.family not in recent_families
-        for change in items
-    )
-    if has_orthogonal or has_new_composition:
+    if has_orthogonal:
         return None
     return (
-        "The last measured candidates contain at least two non-improving outcomes and the current batch repeats their method families and changed factors. Add one executable orthogonal-family or composition challenger, while retaining at most one controlled local refinement."
+        "The last measured candidates contain at least two non-improving outcomes "
+        "and the current batch repeats their method families and changed factors. "
+        "Add one executable orthogonal direction with a new family or changed factor, while "
+        "retaining at most one controlled local refinement. A repeatability check "
+        "is valid when it changes the fold, seed, convergence check, or validation "
+        "protocol and names the unresolved cause."
     )
 
 

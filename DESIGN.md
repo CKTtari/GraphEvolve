@@ -237,13 +237,14 @@ Candidates come from four sources:
 
 Free-form suggestions are never executed directly. Every candidate becomes a ChangeRequest Artifact and then an implementation plan or controlled patch that passes workspace checks.
 
-At the initial discovery boundary, if the proposal batch contains multiple
-distinct method families or components but no composition candidate, the
-controller performs one bounded proposal revision with an explicit coverage
-warning. This is a generic search-space check, not a benchmark-specific
-predictor. Later rounds keep an orthogonal or composition challenger in the
-frontier when recent candidates share factors and fail to improve, so a local
-calibration or inference tweak cannot silently become the whole search space.
+At the initial discovery boundary, if the proposal batch contains only one
+method family or component profile, the controller performs one bounded proposal
+revision with an explicit coverage warning. This is a generic search-space
+check, not a benchmark-specific predictor; composition is one possible
+direction, not a required predictor. Later rounds ask for a new family or
+changed factor when recent candidates share factors and fail to improve, while
+allowing a fold, seed, convergence, or validation repeat when it addresses a
+named robustness question.
 
 ### Candidate specification
 

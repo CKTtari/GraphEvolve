@@ -410,21 +410,22 @@ class ChooseAgent:
 predictor and several genuinely different, executable directions around it. Cover distinct method families when the
 contract supports them, such as representation/features, model family, training objective, calibration, or output
 handling. Include an integrated first candidate plus component-level candidates that can later be tested independently.
-If the candidate set contains multiple useful families or components, include at
-least one explicit composition or fusion challenger; do not treat those families
-as mutually exclusive without evidence. Do not force a fixed number of candidates
-or pad the list; stop when the important design space is represented. Give
-substantive representation, model, objective, training, and composition
-alternatives priority over formatting-only changes when the output schema already
-works."""
+If the candidate set contains multiple useful families or components, consider
+an explicit composition or fusion challenger, but do not assume that composition
+is always the right direction. Do not treat useful families as mutually
+exclusive without evidence. Do not force a fixed number of candidates or pad
+the list; stop when the important design space is represented. Give substantive
+representation, model, objective, training, and composition alternatives
+priority over formatting-only changes when the output schema already works."""
             if initial
             else
             """This is a refinement round. Use the graph evidence to focus on a small set of high-value, attributable
-changes. Prefer an unmeasured family, an explicit backtrack, or a controlled
-composition that answers a visible question. Keep at least one orthogonal or
-composition challenger in the frontier when the graph contains complementary
-unmeasured factors. A local calibration improvement does not make all other
-representation families ineligible."""
+ changes. Prefer an unmeasured family, an explicit backtrack, or a controlled
+change that answers a visible question. When the graph contains complementary
+unmeasured factors, consider a composition or orthogonal challenger, while
+preserving a local refinement when it tests a concrete unresolved cause. A
+local calibration improvement does not make all other representation families
+ineligible."""
         )
         if coverage_feedback:
             phase_instruction += f"\n\nProgrammatic coverage review found a gap:\n{coverage_feedback}\nRevise the candidate batch to close this gap while keeping every candidate executable and tied to the hypothesis."
@@ -471,10 +472,11 @@ proposal node or invent an ID. You own the semantic relation field: declare
 ablate only when the research question intentionally removes a named
 component; declare deepen, combine, or explore when that is the experiment's
 meaning. The graph may flag a mismatch between the relation and component map,
-but it will not silently relabel your experiment. You may also set
-evidence_parent_ids to existing measured outcome IDs whose conclusions
-informed this proposal. These are evidence links, not code parents, and must
-not be proposal IDs. When the contract uses an independent evaluator, make
+but it will not silently relabel your experiment. When a proposal extends,
+contrasts with, or combines measured outcomes, set evidence_parent_ids to every
+relevant existing outcome ID. Leave it empty only when the proposal is genuinely
+independent or no measured outcome exists yet. These are evidence links, not code
+parents, and must not be proposal IDs. When the contract uses an independent evaluator, make
 required_invariants checkable before or after execution at the correct stage:
 solution code must write valid predictions, public validation comparisons can
 be printed by that code, and the experiment controller compares the private
@@ -497,13 +499,15 @@ or compare an unavailable private score.""",
             """Select one feasible candidate index after reading the program-computed path priorities. The index is the
 original candidate index in each supplied row; do not use the row's position after sorting. Rows marked infeasible
 are not selectable. Explain how the method graph's family status, prior evidence, expected gain, information value,
-cost, and risk fit the current question and remaining budget. Prefer an unmeasured family when its value is
-comparable to a repeatedly unproductive family. After two non-improving
-outcomes in one family, select a feasible orthogonal branch unless there is a
-specific unresolved contradiction that another replication would answer.
-Changing only validation folds or mixture weights for the same method is not
-new information when repeated runs agree and the primary metric does not
-improve. Do not select an index outside the supplied list.""",
+cost, and risk fit the current question and remaining budget. Prefer an
+unmeasured family when its value is comparable to a repeatedly unproductive
+family. After two non-improving outcomes in one family, avoid an unmotivated
+repeat, but allow a repeatability or robustness experiment when it changes the
+fold, seed, convergence check, or validation protocol and can distinguish an
+unresolved cause. A positive gain, a disagreement between validation and
+independent evaluation, or an adoption decision is sufficient reason to test
+stability before abandoning that path. Do not select an index outside the
+supplied list.""",
             contract=contract,
             state=state,
             hypothesis=hypothesis,
