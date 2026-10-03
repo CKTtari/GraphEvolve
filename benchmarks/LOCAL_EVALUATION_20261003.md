@@ -1,16 +1,18 @@
-# Local evaluation and v10 interruption audit — 2026-10-03
+# Local evaluation and controller audits — 2026-10-03/04
 
 These are lightweight local evaluations, not official MLE-bench aggregate
 scores. Metrics with different units are reported separately.
 
 | Task | Same-backbone MLEvolve RSI baseline | GraphEvolve latest measured result | Comparison |
 | --- | --- | --- | --- |
-| spooky (log loss, lower better) | 0.345936 | v11: 0.354273; 20 measured rounds, completed | GraphEvolve loses |
+| spooky (log loss, lower better) | 0.345936 | v12: 0.329863; 20 measured rounds, completed | GraphEvolve wins this local score comparison |
 | insults (ROC-AUC, higher better) | 0.916840; interrupted after 3/8 steps | 0.912351; 12 measured rounds | GraphEvolve loses; baseline run incomplete |
 | NOMAD (mean-column-wise RMSLE, lower better) | 0.063968; 8 steps | 0.062517; 6 measured rounds | GraphEvolve wins on the CSV-only task |
 
-The three-win target has not been achieved. Historical spooky v6 remains
-stronger at 0.314828; v9 measured 0.376901. v10's saved incumbent prediction
+The three-win target has not been achieved. Only spooky was rerun under the
+latest evaluated controller (`b01f18f`); insults and NOMAD are earlier runs.
+Historical spooky v6 remains stronger at 0.314828; v9 measured 0.376901.
+v10's saved incumbent prediction
 file was independently rechecked at 0.35683099178266003, with matching IDs,
 finite nonnegative probabilities and normalized rows.
 
@@ -110,5 +112,30 @@ now agree with the persisted completed session. No research-source change
 was made during this audit.
 
 The insults and NOMAD GraphEvolve scores above are earlier runs, not reruns
-under `5a446c8`. A six-score comparison of fully completed baseline runs and
+under `b01f18f`. A six-score comparison of fully completed baseline runs and
 the latest controller on all three tasks therefore remains unfinished.
+
+## v12 follow-up — October 4
+
+The audited design fixes were committed as `b01f18f` and evaluated in a fresh,
+isolated spooky project with `gpt-6-luna`, a five-hour budget and a 20-round cap.
+v12 completed 20 measured rounds at 00:29:43 China time on October 4, after
+4 hours 40 minutes. It stopped at the round cap with about 20 minutes remaining.
+Repairs and four candidate-contract replans did not count as research rounds.
+
+The best retained source and predictions independently reproduce
+**0.32986289055145557**. This beats v11 and the historical same-backbone
+MLEvolve score, but **does not restore v6's 0.314828 or reach 0.31**. The final
+experiment submitted a control at 0.37399610678172257; it did not replace the
+best version. v12 made 337 LLM requests (about 110 minutes), while 23 single
+execution timeouts consumed about 115 minutes. Valid executions took about
+55 minutes. Benchmark data and the contract remained unchanged.
+
+Memory metadata reached the actual prompts after the fixes, but the run also
+revealed unresolved failures: truncated diagnostic summaries, an incorrectly
+described parent predictor, missing parent-source references in repair, and
+review acceptance of a different submission target. Consequently the scores
+are reproducible, while some method-change attributions are not reliable.
+See [the complete v12 report](SPOOKY_V12_EVALUATION_20261003.md) for the code,
+trajectory, evidence and limits. This single rerun is not a controlled estimate
+of each design fix's independent effect or of performance across seeds.
