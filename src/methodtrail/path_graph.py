@@ -1222,20 +1222,17 @@ def _method_similarity(candidate: CandidatePath, outcome: dict[str, Any]) -> flo
     candidate_factors = set(candidate.method.changed_factors)
     historical_factors = set(historical_method.changed_factors)
     factor_overlap = candidate_factors.intersection(historical_factors)
-    candidate_keys = set(candidate.method.components)
-    historical_keys = set(historical_method.components)
-    key_overlap = candidate_keys.intersection(historical_keys)
-    candidate_values = {
-        str(value).strip().lower()
-        for value in candidate.method.components.values()
+    candidate_components = {
+        (str(key).strip().lower(), str(value).strip().lower())
+        for key, value in candidate.method.components.items()
         if str(value).strip()
     }
-    historical_values = {
-        str(value).strip().lower()
-        for value in historical_method.components.values()
+    historical_components = {
+        (str(key).strip().lower(), str(value).strip().lower())
+        for key, value in historical_method.components.items()
         if str(value).strip()
     }
-    value_overlap = candidate_values.intersection(historical_values)
+    component_overlap = candidate_components.intersection(historical_components)
     same_family = (
         candidate.method.family != "unspecified"
         and candidate.method.family == historical_method.family
@@ -1251,7 +1248,9 @@ def _method_similarity(candidate: CandidatePath, outcome: dict[str, Any]) -> flo
         return 1.0
     if factor_overlap and compatible_relation:
         return 0.8
-    if (key_overlap or value_overlap) and compatible_relation:
+    # Schema keys such as features/classifier are common to unrelated methods.
+    # Transfer requires a shared ingredient, not merely the same field name.
+    if component_overlap and compatible_relation:
         return 0.65
     if factor_overlap and _looks_like_composition(candidate) and _looks_like_method_metadata(outcome):
         return 0.55

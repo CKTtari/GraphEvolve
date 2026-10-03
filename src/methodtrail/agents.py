@@ -27,10 +27,9 @@ Do not claim a run happened unless it is present in the context. Keep code chang
 
 # LLM context is a working set, not a database dump.  The state object still
 # keeps the complete graph and artifact history on disk, but prompts receive a
-# bounded, role-neutral summary.  This is especially important for proposal
-# and selection calls: sending every node's full ``change_request`` made the
-# v6 prompts grow past 200k characters and caused the research budget to be
-# spent serialising and rereading old evidence.
+# bounded, role-neutral summary. Saved v6 prompts exceeded 200k characters.
+# Packing must retain graph identity and structured experimental evidence
+# while dropping large payloads rather than removing decision information.
 _DEFAULT_CONTEXT_LIMIT = 80_000
 
 
@@ -64,6 +63,7 @@ def _compact_node(value: Any, *, include_change: bool = False) -> dict[str, Any]
     result: dict[str, Any] = {}
     for key in (
         "node_id",
+        "card_id",
         "variant_id",
         "node_type",
         "status",
@@ -84,6 +84,11 @@ def _compact_node(value: Any, *, include_change: bool = False) -> dict[str, Any]
         "evidence_parent_ids",
         "decision",
         "applicable_conditions",
+        "method_family",
+        "changed_factors",
+        "method_components",
+        "retrieval_source",
+        "relevance",
     ):
         if key in value and value[key] not in (None, "", [], {}):
             result[key] = _short(value[key], 360)
@@ -130,7 +135,39 @@ def _compact_node(value: Any, *, include_change: bool = False) -> dict[str, Any]
             else _short(edge, 300)
             for edge in value["edge_trace"][:8]
         ]
+    if isinstance(value.get("memory_graph_trace"), dict):
+        trace = value["memory_graph_trace"]
+        result["memory_graph_trace"] = {
+            key: trace[key]
+            for key in ("card_id", "score", "distance", "path")
+            if key in trace
+        }
+        result["memory_graph_trace"]["edges"] = [
+            {key: _short(edge[key], 320) for key in ("relation", "edge_type", "reason", "direction") if key in edge}
+            for edge in trace.get("edges", [])[:4]
+        ]
     return result
+
+
+def _sample_method_pool(state: dict[str, Any], limit: int = 36) -> list[dict[str, Any]]:
+    """Retain the active lineage and pending alternatives before recent history."""
+
+    pool = state.get("method_pool") or []
+    anchor_ids = {state.get("incumbent_variant_id")}
+    anchor_ids.update(row.get("node_id") for row in state.get("graph_context", []) if isinstance(row, dict))
+    anchors = [row for row in pool if row.get("node_id") in anchor_ids and row.get("node_type") == "outcome"]
+    pending = [row for row in pool if row.get("node_type") == "proposal" and row.get("status") in {"proposed", "ranked", "selected"}]
+    chosen = []
+    seen = set()
+    for row in [*anchors, *pending, *reversed(pool)]:
+        node_id = row.get("node_id")
+        if node_id in seen:
+            continue
+        seen.add(node_id)
+        chosen.append(_compact_node(row))
+        if len(chosen) >= limit:
+            break
+    return chosen
 
 
 def _compact_candidate(value: Any) -> dict[str, Any]:
@@ -156,6 +193,15 @@ def _compact_candidate(value: Any) -> dict[str, Any]:
                 "failure_risk",
                 "composition_penalty",
                 "reason",
+                "method_family",
+                "family_outcome_count",
+                "family_unproductive_count",
+                "novel_changed_factors",
+                "exact_measured",
+                "factor_stuck",
+                "recent_non_improving",
+                "gain_multiplier",
+                "information_multiplier",
             )
             if signal.get(key) not in (None, "", [], {})
         }
@@ -258,12 +304,9 @@ def _compact_state(value: Any) -> dict[str, Any]:
             ]
     result["graph_context"] = [
         _compact_node(item)
-        for item in (state.get("graph_context") or [])[-14:]
+        for item in (state.get("graph_context") or [])[:14]
     ]
-    result["method_pool"] = [
-        _compact_node(item, include_change=False)
-        for item in (state.get("method_pool") or [])[-36:]
-    ]
+    result["method_pool"] = _sample_method_pool(state)
     result["memory_context"] = [
         _compact_node(item, include_change=False)
         for item in (state.get("memory_context") or [])[:8]
@@ -293,7 +336,7 @@ def _compact_state(value: Any) -> dict[str, Any]:
                 else _short(profile[key], 900)
             )
             for key in profile
-            if key in {"nodes", "edges", "families", "summary", "recent"}
+            if key in {"nodes", "edges", "families", "summary", "recent", "card_count", "decisions", "method_families", "linked_card_count"}
         }
     return result
 
@@ -429,9 +472,9 @@ priority over formatting-only changes when the output schema already works."""
             else
             """This is a refinement round. Use the graph evidence to focus on a small set of high-value, attributable
  changes. Prefer an unmeasured family, an explicit backtrack, or a controlled
-change that answers a visible question. When the graph contains complementary
-unmeasured factors, consider a composition or orthogonal challenger, while
-preserving a local refinement when it tests a concrete unresolved cause. A
+change that answers a visible question. Keep an executable alternative in the frontier when
+the evidence leaves a distinct family or factor untested. This can be an existing pending candidate;
+candidate count and method type remain evidence-driven. Preserve a local refinement when it tests a concrete unresolved cause. A
 local calibration improvement does not make all other representation families
 ineligible."""
         )
@@ -509,12 +552,11 @@ original candidate index in each supplied row; do not use the row's position aft
 are not selectable. Explain how the method graph's family status, prior evidence, expected gain, information value,
 cost, and risk fit the current question and remaining budget. Prefer an
 unmeasured family when its value is comparable to a repeatedly unproductive
-family. After two non-improving outcomes in one family, avoid an unmotivated
-repeat, but allow a repeatability or robustness experiment when it changes the
-fold, seed, convergence check, or validation protocol and can distinguish an
-unresolved cause. A positive gain, a disagreement between validation and
-independent evaluation, or an adoption decision is sufficient reason to test
-stability before abandoning that path. Do not select an index outside the
+family. Compare a repeatability experiment with other candidates using the specific
+measured uncertainty it can resolve, its comparison protocol, and an explicit closure
+condition. Account for dataset and sampling differences when interpreting validation
+and independent-evaluation scores. When the comparison has answered its question,
+close that uncertainty and return to the available frontier. Do not select an index outside the
 supplied list.""",
             contract=contract,
             state=state,
@@ -863,7 +905,7 @@ def _context(
     if len(serialized) > prose_limit:
         for key in ("method_pool", "graph_context", "memory_context", "portfolio_context"):
             if isinstance(packed.get("state"), dict) and isinstance(packed["state"].get(key), list):
-                packed["state"][key] = packed["state"][key][-8:]
+                packed["state"][key] = packed["state"][key][:8]
         serialized = json.dumps(packed, ensure_ascii=False, separators=(",", ":"))
     if len(serialized) > prose_limit:
         # This should be rare after the per-field caps.  Keep the instruction,

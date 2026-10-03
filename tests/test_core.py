@@ -57,7 +57,7 @@ def test_agent_context_is_bounded_but_keeps_directed_graph_identity() -> None:
                 "change_logic": "x" * 2000,
                 "edge_trace": [{"relation": "lineage", "reason": "edge"}],
             }
-            for index in range(30)
+            for index in reversed(range(30))
         ],
         "method_pool": [
             {
@@ -95,6 +95,57 @@ def test_candidate_context_preserves_original_indices() -> None:
     rendered = _context("choose", context_limit=20_000, ranked_candidates=candidates)
     for index in range(30):
         assert f'"index":{index}' in rendered
+
+
+def test_context_keeps_memory_profile_components_and_directed_trace() -> None:
+    profile = {"card_count": 15, "method_families": {"family-a": 8, "family-b": 7},
+               "decisions": {"adopt": 3, "evidence": 12}, "linked_card_count": 20}
+    card = {
+        "card_id": "card-a", "variant_id": "outcome-a", "method_family": "family-a",
+        "method_components": {"features": "representation-a"}, "changed_factors": ["factor-a"],
+        "retrieval_source": "memory_graph",
+        "memory_graph_trace": {"card_id": "card-a", "distance": 1, "path": ["seed", "card-a"],
+                               "edges": [{"relation": "informed_by", "direction": "ancestor", "reason": "matched evidence"}]},
+    }
+    rendered = _context("research decision", state={"memory_graph_context": profile, "memory_context": [card]})
+    state = json.loads(rendered.split("Context:\n", 1)[1])["state"]
+    assert state["memory_graph_context"] == profile
+    memory = state["memory_context"][0]
+    assert memory["card_id"] == "card-a"
+    assert memory["method_family"] == "family-a"
+    assert memory["method_components"] == {"features": "representation-a"}
+    assert memory["changed_factors"] == ["factor-a"]
+    assert memory["memory_graph_trace"]["path"] == ["seed", "card-a"]
+    assert memory["memory_graph_trace"]["edges"][0]["direction"] == "ancestor"
+
+
+def test_method_pool_preserves_old_pending_candidates_and_incumbent() -> None:
+    pool = [{"node_id": "incumbent", "node_type": "outcome", "status": "adopted"}]
+    pool.append({"node_id": "old-pending", "node_type": "proposal", "status": "proposed"})
+    pool.extend({"node_id": f"done-{i}", "node_type": "outcome", "status": "deferred"} for i in range(45))
+    rendered = _context("propose", state={"incumbent_variant_id": "incumbent", "method_pool": pool})
+    packed = json.loads(rendered.split("Context:\n", 1)[1])["state"]["method_pool"]
+    ids = {item["node_id"] for item in packed}
+    assert "incumbent" in ids and "old-pending" in ids
+    assert len(packed) == 36
+    # Under a tighter context budget, already prioritized entries still survive.
+    rendered = _context("propose", context_limit=2000, state={
+        "incumbent_variant_id": "incumbent", "method_pool": pool,
+    })
+    ids = {item["node_id"] for item in json.loads(rendered.split("Context:\n", 1)[1])["state"]["method_pool"]}
+    assert {"incumbent", "old-pending"}.issubset(ids)
+
+
+def test_candidate_context_keeps_graph_repeat_and_novelty_evidence() -> None:
+    signal = {"feasible": True, "family_status": "saturated", "family_outcome_count": 5,
+              "family_unproductive_count": 4, "factor_stuck": True,
+              "novel_changed_factors": ["new-factor"], "gain_multiplier": 0.45,
+              "information_multiplier": 1.25, "exact_measured": False}
+    rendered = _context("choose", ranked_candidates=[{
+        "index": 3, "priority": 0.1, "candidate": {"title": "candidate"}, "graph_signal": signal,
+    }])
+    packed = json.loads(rendered.split("Context:\n", 1)[1])
+    assert packed["ranked_candidates"][0]["graph_signal"] == signal
 
 
 def test_repo_map_reads_workspace_under_parent_runs_directory(tmp_path: Path) -> None:
@@ -698,6 +749,52 @@ def test_path_graph_blends_llm_estimate_with_measured_history(tmp_path: Path) ->
     calibrated = graph.calibrate(candidate)
     assert calibrated.expected_gain > candidate.expected_gain
     assert calibrated.estimated_seconds < candidate.estimated_seconds
+
+
+def test_common_component_field_names_do_not_transfer_unrelated_scores(tmp_path: Path) -> None:
+    graph = ExperimentPathGraph(tmp_path / "graph.json")
+    historical = MethodDescriptor(
+        family="family-a", components={"features": "representation-a", "classifier": "model-a"},
+        changed_factors=["factor-a"],
+    )
+    graph.add_node(PathNode(
+        variant_id="parent", title="reference", mutation_class=MutationClass.IMPLEMENTATION,
+        question="test", evidence_summary="reference", metric=0.3, method=historical, status="adopted",
+    ))
+    for index in range(4):
+        graph.add_node(PathNode(
+            variant_id=f"bad-{index}", parent_variant_id="parent", relation="deepen",
+            title="measured worse", mutation_class=MutationClass.IMPLEMENTATION,
+            question="test", evidence_summary="worse", metric=0.5, wall_seconds=300, method=historical, status="deferred",
+        ))
+    candidate = CandidatePath(
+        variant_id="new", title="independent method", relation="deepen",
+        expected_gain=0.1, information_gain=0.3, estimated_seconds=50, failure_risk=0.2,
+        method=MethodDescriptor(
+            family="family-b", components={"features": "representation-b", "classifier": "model-b"},
+            changed_factors=["factor-b"],
+        ),
+    )
+    calibrated = graph.calibrate(candidate, maximize_metric=False)
+    assert calibrated.expected_gain == candidate.expected_gain
+    assert calibrated.estimated_seconds == candidate.estimated_seconds
+    assert calibrated.failure_risk == candidate.failure_risk
+
+
+def test_shared_component_value_can_transfer_across_families(tmp_path: Path) -> None:
+    graph = ExperimentPathGraph(tmp_path / "graph.json")
+    method = MethodDescriptor(family="family-a", components={"features": "same representation"}, changed_factors=["factor-a"])
+    graph.add_node(PathNode(variant_id="parent", title="parent", mutation_class=MutationClass.IMPLEMENTATION,
+                            question="test", evidence_summary="reference", metric=0.5, method=method, status="adopted"))
+    graph.add_node(PathNode(variant_id="better", parent_variant_id="parent", relation="deepen", title="better",
+                            mutation_class=MutationClass.IMPLEMENTATION, question="test", evidence_summary="gain",
+                            metric=0.3, wall_seconds=20, method=method, status="adopted"))
+    candidate = CandidatePath(
+        variant_id="new", title="new family sharing a representation", relation="deepen",
+        expected_gain=0.01, information_gain=0.2, estimated_seconds=30, failure_risk=0.1,
+        method=MethodDescriptor(family="family-b", components={"features": "same representation"}, changed_factors=["factor-b"]),
+    )
+    assert graph.calibrate(candidate, maximize_metric=False).expected_gain > candidate.expected_gain
 
 
 def test_path_graph_transfers_shared_factor_evidence_across_families(tmp_path: Path) -> None:
