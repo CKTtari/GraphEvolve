@@ -81,7 +81,7 @@ class RepoMap:
         limit: int = 6,
         max_chars_each: int = 5000,
         full_paths: set[str] | None = None,
-        full_file_limit: int = 20000,
+        full_file_limit: int | None = None,
     ) -> list[dict[str, str]]:
         tokens = {
             token.lower() for token in re.findall(r"[A-Za-z_][A-Za-z0-9_]+", query)
@@ -113,7 +113,10 @@ class RepoMap:
             full_path = self.root / entry.path
             content = full_path.read_text(encoding="utf-8", errors="replace")
             include_full = any(fnmatch(entry.path, pattern) for pattern in full_paths)
-            if include_full and len(content) <= full_file_limit:
+            # Exact patches require the complete editable file. A former
+            # size cutoff silently returned its prefix precisely when the
+            # implementation grew large enough to need careful repairs.
+            if include_full:
                 excerpt = content
             else:
                 excerpt = content[:max_chars_each]
@@ -122,6 +125,7 @@ class RepoMap:
                     "path": entry.path,
                     "content": excerpt,
                     "symbols": ", ".join(entry.symbols),
+                    "complete": str(include_full or len(content) <= max_chars_each).lower(),
                 }
             )
         return result

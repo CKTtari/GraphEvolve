@@ -111,6 +111,21 @@ complements the deterministic verifier: the verifier can prove syntax,
 dependencies, and required output paths, while the review checks whether the
 implementation still means what the hypothesis says.
 
+Editable files enter Coding and review context in full. Graph history and
+prose may be summarized, but source and the cumulative diff are preserved.
+If they cannot fit the configured context budget, the controller records an
+explicit interruption rather than asking an agent to guess a patch from a
+prefix. During repair, review compares the complete current implementation
+with the immutable parent snapshot and the original candidate contract. An
+earlier correct change does not have to appear again in the latest patch.
+
+Malformed repair artifacts are technical failures: the model receives its
+previous response and field-specific validation feedback, then retries using
+fresh source within the existing repair and time limits. Unexpected controller
+errors persist an interrupted session and refresh its dashboard. Numerical
+metric ties (relative and absolute tolerance `1e-12`) neither promote a new
+incumbent nor increment the adjacent-round deterioration counter.
+
 The Coding Agent has no authority to choose the research objective. Reflection and Choose define what should be tested; the Coding Agent decides how to express that test in executable code.
 
 ## 4. Artifact model

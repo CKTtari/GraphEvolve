@@ -1,12 +1,20 @@
 from __future__ import annotations
 
+import json
 import sys
 from pathlib import Path
+from types import SimpleNamespace
 
-from methodtrail.agents import _context
+import pytest
+
+from methodtrail.agents import SourceContextTooLarge, _context
 from methodtrail.artifacts import ArtifactStore
 from methodtrail.execution import Executor, Verifier
-from methodtrail.llm import LLMDeadlineExceeded
+from methodtrail.llm import (
+    LLMDeadlineExceeded,
+    LLMOutputValidationError,
+    OpenAICompatibleLLM,
+)
 from methodtrail.memory import BugMemory, ExperimentMemory, MemoryCard
 from methodtrail.orchestrator import MethodTrail, _metric_deteriorated
 from methodtrail.path_graph import ExperimentPathGraph, candidate_coverage_gap
@@ -103,6 +111,51 @@ def test_repo_map_reads_workspace_under_parent_runs_directory(tmp_path: Path) ->
     assert "def predict" in context[0]["content"]
 
 
+def test_editable_source_tail_survives_retrieval_and_prompt_compaction(tmp_path: Path) -> None:
+    source = "# " + "x" * 30_000 + "\ndef main():\n    return 1\n\nif __name__ == '__main__':\n    main()\n"
+    (tmp_path / "solution.py").write_text(source, encoding="utf-8")
+    context = RepoMap(tmp_path).retrieve("repair", full_paths={"solution.py"})
+    assert context[0]["content"] == source
+    rendered = _context(
+        "repair one local block", context_limit=40_000, repository_context=context,
+        known_failures=["old failure " + "z" * 5000 for _ in range(12)],
+    )
+    packed = json.loads(rendered.split("Context:\n", 1)[1])
+    assert packed["repository_context"][0]["content"] == source
+    assert len(rendered) < 40_100
+
+
+def test_oversized_source_is_explicitly_rejected_instead_of_hidden() -> None:
+    with pytest.raises(SourceContextTooLarge, match="source was not truncated"):
+        _context("repair", context_limit=1000, repository_context=[
+            {"path": "solution.py", "content": "x" * 2000},
+        ])
+
+
+def test_schema_correction_receives_previous_invalid_patch() -> None:
+    bad = json.dumps({
+        "summary": "patch", "expected_test": "run", "edits": [{
+            "operation": "replace", "path": "solution.py", "old_text": "old",
+            "symbol": "main", "new_text": "new", "purpose": "local fix",
+        }],
+    })
+    good = json.loads(bad)
+    good["edits"][0]["symbol"] = None
+    requests = []
+
+    def create(**kwargs):
+        requests.append(kwargs)
+        content = bad if len(requests) == 1 else json.dumps(good)
+        return SimpleNamespace(choices=[SimpleNamespace(message=SimpleNamespace(content=content))])
+
+    llm = OpenAICompatibleLLM.__new__(OpenAICompatibleLLM)
+    llm.model, llm.deadline, llm.log_path = "test", None, None
+    llm.client = SimpleNamespace(chat=SimpleNamespace(completions=SimpleNamespace(create=create)))
+    assert llm.complete("system", "original task", CodePlanArtifact).edits[0].symbol is None
+    assert requests[1]["messages"][2] == {"role": "assistant", "content": bad}
+    assert "symbol=null" in requests[1]["messages"][3]["content"]
+
+
 def test_artifact_store_round_trip(tmp_path: Path) -> None:
     store = ArtifactStore(tmp_path / "artifacts.sqlite")
     artifact_id = store.put("fact", {"metric": 0.42})
@@ -162,6 +215,20 @@ def test_deterioration_is_strict_and_direction_aware() -> None:
     assert not _metric_deteriorated(0.3, 0.3, False)
     assert not _metric_deteriorated(0.3, 0.2, False)
     assert not _metric_deteriorated(None, 0.4, False)
+    assert not _metric_deteriorated(0.35683099178266087, 0.35683099178266003, True)
+    assert not _metric_deteriorated(0.35683099178266003, 0.35683099178266087, False)
+
+
+def test_numeric_tie_does_not_replace_incumbent(tmp_path: Path) -> None:
+    trail = MethodTrail(tmp_path, FakeLLM())
+    trail.project = SimpleNamespace(incumbent_metric=0.35683099178266087)
+    contract = TaskContract(
+        task_id="tie", description="toy", workspace_template=str(tmp_path),
+        allowed_data_paths=[], run_command=[sys.executable, "solution.py"],
+        metric_name="loss", maximize_metric=False,
+    )
+    assert not trail._metric_improves_incumbent(contract, 0.35683099178266003)
+    assert trail._metric_improves_incumbent(contract, 0.35)
 
 
 def test_initial_candidate_coverage_requires_a_distinct_direction() -> None:
@@ -1035,6 +1102,12 @@ class SemanticRetryFakeLLM(FakeLLM):
     def complete(self, system: str, user: str, response_model):  # type: ignore[no-untyped-def]
         if response_model is ImplementationReviewArtifact:
             self.review_calls += 1
+            context = json.loads(user.split("Context:\n", 1)[1])
+            # Every review must see the complete delta from the original
+            # parent, including changes made before the latest local repair.
+            assert "predictions.csv" in context["actual_diff"]
+            assert f"# marker {self.review_calls - 1}" in context["actual_diff"]
+            assert context["change"]["mutation_class"] == "implementation"
             passed = self.review_calls >= 5
             return ImplementationReviewArtifact(
                 passed=passed,
@@ -1568,6 +1641,72 @@ def test_orchestrator_repairs_a_failed_generated_program(tmp_path: Path) -> None
     assert result.assessment is not None and result.assessment.decision == "adopt"
     assert result.run is not None and result.run.metric == 0.8
     assert trail.coding.llm.code_plan_calls == 2
+
+
+def test_invalid_repair_response_recovers_without_reapplying_or_counting_a_round(tmp_path: Path) -> None:
+    class InvalidRepairLLM(RepairingFakeLLM):
+        invalid_returned = False
+
+        def complete(self, system, user, response_model):
+            if response_model is CodePlanArtifact and self.code_plan_calls == 1:
+                if not self.invalid_returned:
+                    self.invalid_returned = True
+                    raise LLMOutputValidationError("replace requires old_text and no symbol")
+                assert "repair plan validation failed" in user
+                assert "intentional first-pass failure" in user
+            return super().complete(system, user, response_model)
+
+    template = tmp_path / "template"
+    template.mkdir()
+    (template / "evaluate.py").write_text(
+        "import json\njson.dump({'score': 0.8}, open('metrics.json', 'w'))\n", encoding="utf-8",
+    )
+    contract = TaskContract(
+        task_id="invalid-patch", description="toy", workspace_template=str(template),
+        allowed_data_paths=[], run_command=[sys.executable, "solution.py"],
+        evaluation_command=[sys.executable, "evaluate.py"], metric_name="score",
+        required_outputs=["predictions.csv"], protected_paths=["evaluate.py", "metrics.json"],
+        timeout_seconds=30,
+    )
+    trail = MethodTrail(tmp_path / "project", InvalidRepairLLM())
+    results = trail.run_research(contract, total_seconds=120, max_iterations=1)
+    assert len(results) == 1 and results[0].completed_research
+    assert results[0].run.metric == 0.8
+    assert trail.session.status == "completed"
+    bug_path = trail.projects.project_path(trail.project) / "memory" / "bugs.jsonl"
+    bugs = [json.loads(line) for line in bug_path.read_text(encoding="utf-8").splitlines()]
+    assert sum(bug["phase"] == "planning" for bug in bugs) == 1
+    assert sum(bug["phase"] == "execution" for bug in bugs) == 1
+
+
+def test_unexpected_planning_error_marks_session_interrupted(tmp_path: Path) -> None:
+    class BrokenPlanner(FakeLLM):
+        def set_deadline(self, deadline):
+            self.deadline = deadline
+
+        def complete(self, system, user, response_model):
+            if response_model is CodePlanArtifact:
+                raise RuntimeError("unexpected planning failure")
+            return super().complete(system, user, response_model)
+
+    template = tmp_path / "template"
+    template.mkdir()
+    contract = TaskContract(
+        task_id="broken-planner", description="toy", workspace_template=str(template),
+        allowed_data_paths=[], run_command=[sys.executable, "solution.py"], metric_name="score",
+    )
+    llm = BrokenPlanner()
+    trail = MethodTrail(tmp_path / "project", llm)
+    with pytest.raises(RuntimeError, match="unexpected planning failure"):
+        trail.run_research(contract, total_seconds=120, max_iterations=1)
+    assert trail.session.status == "interrupted"
+    assert llm.deadline is None
+    session_dir = trail.projects.project_path(trail.project) / "sessions" / trail.session.session_id
+    assert json.loads((session_dir / "session.json").read_text(encoding="utf-8"))["status"] == "interrupted"
+    events = [json.loads(line) for line in (session_dir / "trajectory.jsonl").read_text(encoding="utf-8").splitlines()]
+    assert any(event["kind"] == "research_interrupted" for event in events)
+    assert not any(event["kind"] == "iteration_finished" for event in events)
+    assert (session_dir / "dashboard.html").exists()
 
 
 def test_external_evaluator_overwrites_model_reported_metric(tmp_path: Path) -> None:

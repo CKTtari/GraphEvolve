@@ -34,6 +34,10 @@ Do not claim a run happened unless it is present in the context. Keep code chang
 _DEFAULT_CONTEXT_LIMIT = 80_000
 
 
+class SourceContextTooLarge(ValueError):
+    """Source cannot fit without hiding code needed for an exact patch."""
+
+
 def _short(value: Any, limit: int) -> Any:
     """Return a stable, readable prefix for prompt text."""
 
@@ -329,22 +333,22 @@ def _compact_payload(key: str, value: Any) -> Any:
                 }
             }
     if key in {"actual_diff", "diff"}:
-        return _short(value, 18_000)
+        return value
     if key in {"ranked_candidates", "candidates"} and isinstance(value, list):
         return [_compact_candidate(item) for item in value[:40]]
     if key in {"repository_context", "repo_context"} and isinstance(value, list):
         compact = []
-        for item in value[:8]:
+        for item in value:
             if isinstance(item, dict):
                 compact.append(
                     {
-                        name: _short(item.get(name), 9000 if name == "content" else 420)
-                        for name in ("path", "content", "language", "retrieval_reason")
+                        name: item.get(name) if name == "content" else _short(item.get(name), 420)
+                        for name in ("path", "content", "language", "retrieval_reason", "complete")
                         if item.get(name) is not None
                     }
                 )
             else:
-                compact.append(_short(item, 9000))
+                compact.append(item)
         return compact
     if key in {"known_failures", "issues", "checks"} and isinstance(value, list):
         return [_short(item, 900) if isinstance(item, str) else _compact_node(item) for item in value[:12]]
@@ -376,12 +380,16 @@ class ReflectionAgent:
         self, contract: TaskContract, state: ResearchState, trigger: str | None = None
     ) -> HypothesisArtifact:
         if state.iteration <= 1 and state.incumbent_metric is None:
-            instruction = """This is the first research round. Do a strong initial design pass rather than a tiny local tweak. Read the task contract, data description, metric, execution limits, and any supplied history. Form a coherent first predictor plan that covers the most important representation, model, training, composition, and output decisions. Treat distinct representations or model families as potentially complementary until evidence separates them. When two or more useful components are available, require a composition challenger as well as component-level controls. At the same time, state the independent evidence that would tell us which parts deserve deeper work. The result must still be testable in one run: write one clear initial hypothesis, its complete comparison plan, adoption conditions, and fallback conditions. When the output schema already works, spend the initial design effort on substantive predictive choices rather than formatting-only or probability-postprocessing tweaks."""
+            instruction = """This is the first research round. Do a strong initial design pass rather than a tiny local tweak. Read the task contract, data description, metric, execution limits, and any supplied history. Form a coherent first predictor plan that covers the most important representation, model, training, composition, and output decisions. Treat distinct representations or model families as potentially complementary until evidence separates them. When useful components may complement each other, consider a composition challenger and component-level controls; select the direction from task facts and evidence, without requiring a particular candidate type. At the same time, state the independent evidence that would tell us which parts deserve deeper work. The result must still be testable in one run: write one clear initial hypothesis, its complete comparison plan, adoption conditions, and fallback conditions. When the output schema already works, spend the initial design effort on substantive predictive choices rather than formatting-only or probability-postprocessing tweaks."""
         else:
             instruction = """Refine the current observation into one research question. State what evidence would answer it,
 how to compare alternatives, and what conditions lead to adoption or fallback. Later rounds should make changes more
 evidence-driven and attributable than the initial design. Do not let a local calibration or implementation gain erase
-an unmeasured complementary representation or composition. After two consecutive non-improving experiments that share
+an unmeasured complementary representation or composition. Once the independent evaluator and execution checks have
+verified the interface and output invariants, further formatting, warning-reporting, or numerically equivalent hygiene
+changes belong to technical maintenance unless recorded evidence identifies an unresolved uncertainty that could change
+the research conclusion. Prefer a substantive predictive or validation question over rechecking already satisfied
+output invariants. After two consecutive non-improving experiments that share
 the same changed factors, prefer a backtrack to a measured ancestor or an orthogonal method family."""
         user = _context(
             instruction,
@@ -661,7 +669,7 @@ class ImplementationReviewAgent:
             )
         user = _context(
             """Act as an independent implementation gate for one selected experiment. Read the selected research
-question, the declared required invariants, the Coding Agent plan, the actual applied diff, and the current source
+question, the declared required invariants, the Coding Agent plan, the cumulative diff from the original parent, and the current source
 context. Check that the code tests the requested factor, keeps the task interface and output schema intact, and does
 not silently substitute a fallback or data leak. If initial_candidate is true, there is no usable parent predictor:
 the complete first implementation and its model/vectorizer choices are in scope, so do not reject them merely because
@@ -688,7 +696,9 @@ be kept. Do not silently change the research question or relabel an ablation.
 Do not use replan for an ordinary code bug: set passed=false,
 decision="repair", and give concrete source-level issues. A replan returns to
 candidate selection in the same research round; neither outcome counts as
-measured evidence. Set decision="pass" only when passed=true.""",
+measured evidence. During technical repair, earlier patches remain in the current source and cumulative diff:
+judge the complete resulting implementation, not whether the latest small patch repeats every earlier change.
+Do not add requirements beyond the selected contract and required invariants. Set decision="pass" only when passed=true.""",
             contract=contract,
             change=change,
             plan=plan,
@@ -823,8 +833,8 @@ def _context(
     method family and metric; repository rows keep only the files relevant to
     the edit; candidate rows keep every original index so selection remains
     valid.  The final shrink is a safety valve for unusually large source
-    files, and still emits valid JSON rather than cutting a serialized object
-    in the middle.
+    files. Editable source and cumulative diffs are never shortened: an
+    incomplete file is not usable evidence for an exact local patch.
     """
 
     packed = {
@@ -832,18 +842,30 @@ def _context(
         for key, value in payload.items()
         if value is not None
     }
+    protected = {
+        key: packed.pop(key)
+        for key in ("repository_context", "repo_context", "actual_diff", "diff")
+        if key in packed
+    }
+    protected_size = len(json.dumps(protected, ensure_ascii=False, separators=(",", ":")))
+    if protected_size > context_limit:
+        raise SourceContextTooLarge(
+            f"Complete source and diff need {protected_size} characters; context limit is {context_limit}. "
+            "Increase the coding context budget or select fewer editable files; source was not truncated."
+        )
+    prose_limit = max(0, context_limit - protected_size)
     serialized = json.dumps(packed, ensure_ascii=False, separators=(",", ":"))
-    if len(serialized) > context_limit:
+    if len(serialized) > prose_limit:
         # Prefer preserving all candidate indices and the latest state while
         # making prose and source excerpts progressively smaller.
         packed = _shrink_strings(packed, limit=1400)
         serialized = json.dumps(packed, ensure_ascii=False, separators=(",", ":"))
-    if len(serialized) > context_limit:
+    if len(serialized) > prose_limit:
         for key in ("method_pool", "graph_context", "memory_context", "portfolio_context"):
             if isinstance(packed.get("state"), dict) and isinstance(packed["state"].get(key), list):
                 packed["state"][key] = packed["state"][key][-8:]
         serialized = json.dumps(packed, ensure_ascii=False, separators=(",", ":"))
-    if len(serialized) > context_limit:
+    if len(serialized) > prose_limit:
         # This should be rare after the per-field caps.  Keep the instruction,
         # contract, state scalars, and a clearly marked compact remainder.
         compact: dict[str, Any] = {}
@@ -853,9 +875,6 @@ def _context(
             "change",
             "hypothesis",
             "plan",
-            "actual_diff",
-            "repository_context",
-            "repo_context",
             "run",
             "recovery",
             "ranked_candidates",
@@ -863,21 +882,19 @@ def _context(
         ):
             if key in packed:
                 value = packed[key]
-                if key in {"repository_context", "repo_context"} and isinstance(value, list):
-                    value = [
-                        {
-                            "path": item.get("path", ""),
-                            "content": _short(item.get("content", ""), 1800),
-                        }
-                        for item in value[:8]
-                        if isinstance(item, dict)
-                    ]
                 compact[key] = value
         compact["context_notice"] = (
-            "Older graph/source details were compacted after reaching the prompt limit; "
+            "Older graph details were compacted after reaching the prompt limit; "
             "use the supplied IDs and current repository files for the next decision."
         )
-        serialized = json.dumps(_shrink_strings(compact, 900), ensure_ascii=False, separators=(",", ":"))
+        packed = _shrink_strings(compact, 900)
+    packed.update(protected)
+    serialized = json.dumps(packed, ensure_ascii=False, separators=(",", ":"))
+    if protected and len(serialized) > context_limit:
+        raise SourceContextTooLarge(
+            "Complete source, diff and required task context exceed the coding context budget; "
+            "source was not truncated."
+        )
     return f"{instruction}\n\nContext:\n{serialized}"
 
 

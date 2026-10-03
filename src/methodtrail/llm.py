@@ -21,6 +21,10 @@ class LLMDeadlineExceeded(RuntimeError):
     """The shared research deadline expired before an LLM artifact was returned."""
 
 
+class LLMOutputValidationError(RuntimeError):
+    """A response failed the artifact contract; no code edit was applied."""
+
+
 class StructuredLLM(Protocol):
     def complete(self, system: str, user: str, response_model: type[T]) -> T: ...
 
@@ -78,6 +82,7 @@ class OpenAICompatibleLLM:
             + json.dumps(schema, ensure_ascii=False, indent=2)
         )
         correction = ""
+        previous_content = ""
         for attempt in range(3):
             call_id = uuid.uuid4().hex
             started = time.perf_counter()
@@ -87,11 +92,16 @@ class OpenAICompatibleLLM:
                     "model": self.model,
                     "messages": [
                         {"role": "system", "content": system},
-                        {"role": "user", "content": request_user},
+                        {"role": "user", "content": user + schema_prompt},
                     ],
                     "response_format": {"type": "json_object"},
                     "temperature": 0.2 if attempt == 0 else 0.0,
                 }
+                if correction:
+                    request_kwargs["messages"].extend([
+                        {"role": "assistant", "content": previous_content},
+                        {"role": "user", "content": correction},
+                    ])
                 if self.deadline is not None:
                     remaining = self.deadline - time.monotonic()
                     if remaining <= 0:
@@ -156,15 +166,18 @@ class OpenAICompatibleLLM:
                     error=f"{type(exc).__name__}: {exc}",
                 )
                 if attempt < 2:
+                    previous_content = content
                     correction = (
                         "\n\nYour previous JSON failed validation with this error:\n"
                         f"{exc}\nReturn a corrected JSON object only. Preserve the research question. "
                         "For FileEdit, use operation=create only for an absent file; "
-                        "for operation=replace provide a non-empty exact old_text snippet."
+                        "for operation=replace provide a non-empty exact old_text snippet and symbol=null; "
+                        "for operation=replace_symbol provide symbol and old_text=null. "
+                        "Correct the failed fields in the previous response using the current source context."
                     )
                     continue
-                raise RuntimeError(
-                    f"LLM response did not match {response_model.__name__}; expected schema keys: {list(schema.get('properties', {}))}"
+                raise LLMOutputValidationError(
+                    f"LLM response did not match {response_model.__name__}: {str(exc)[:1800]}"
                 ) from exc
             self._log_call(
                 call_id,

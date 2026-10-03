@@ -31,6 +31,42 @@ class WorkspaceManager:
         )
         return run_path
 
+    def source_snapshot(self, workspace: Path, contract: TaskContract) -> dict[str, str]:
+        """Capture editable sources without including data or generated outputs."""
+
+        paths = {
+            path.relative_to(workspace).as_posix()
+            for pattern in contract.editable_paths or [contract.solution_entrypoint]
+            for path in workspace.glob(pattern)
+            if path.is_file()
+        }
+        return {
+            relative: self._safe_target(workspace, relative, contract).read_text(encoding="utf-8")
+            for relative in sorted(paths)
+        }
+
+    def cumulative_diff(
+        self, workspace: Path, baseline: dict[str, str], contract: TaskContract,
+        changed_paths: set[str],
+    ) -> str:
+        """Compare the full repaired implementation with its immutable parent."""
+
+        current = self.source_snapshot(workspace, contract)
+        # Older contracts may omit editable_paths. Explicitly changed files
+        # still need review, including a newly created first solution.
+        for relative in changed_paths:
+            target = self._safe_target(workspace, relative, contract)
+            current[relative] = target.read_text(encoding="utf-8") if target.exists() else ""
+        return "".join(
+            line
+            for relative in sorted(set(baseline) | set(current))
+            for line in difflib.unified_diff(
+                baseline.get(relative, "").splitlines(keepends=True),
+                current.get(relative, "").splitlines(keepends=True),
+                fromfile=f"a/{relative}", tofile=f"b/{relative}",
+            )
+        )
+
     def apply_plan(
         self,
         workspace: Path,

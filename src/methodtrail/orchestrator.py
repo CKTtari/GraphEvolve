@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+import math
 import re
 import time
 from dataclasses import asdict, dataclass
@@ -23,7 +24,7 @@ from .agents import (
 from .artifacts import ArtifactStore
 from .dashboard import write_dashboard
 from .execution import Executor, Verifier
-from .llm import LLMDeadlineExceeded, StructuredLLM
+from .llm import LLMDeadlineExceeded, LLMOutputValidationError, StructuredLLM
 from .memory import BugMemory, BugRecord, ExperimentMemory, MemoryCard
 from .path_graph import ExperimentPathGraph, candidate_coverage_gap
 from .portfolio import PortfolioManager, VariantProfile
@@ -78,6 +79,8 @@ def _metric_deteriorated(
     """Return whether the current result is strictly worse than the prior one."""
 
     if previous is None or current is None:
+        return False
+    if math.isclose(previous, current, rel_tol=1e-12, abs_tol=1e-12):
         return False
     # A maximize metric deteriorates when it decreases; a minimize metric
     # deteriorates when it increases. Equality is not deterioration.
@@ -365,7 +368,7 @@ class MethodTrail:
         workspace = Path(candidate.workspace)
         repo_context = RepoMap(workspace).retrieve(
             f"{change.research_question} {change.title}",
-            full_paths=set(contract.editable_paths),
+            full_paths=set(contract.editable_paths or [contract.solution_entrypoint]),
         )
         plan = self.coding.write_plan(
             contract,
@@ -770,6 +773,8 @@ class MethodTrail:
         started = time.monotonic()
         last_review: ImplementationReviewArtifact | None = None
         seen_patch_signatures: set[str] = set()
+        parent_sources = self.workspaces.source_snapshot(workspace, contract)
+        changed_paths: set[str] = set()
 
         while True:
             if time.monotonic() - started >= max(1, remaining_seconds):
@@ -806,18 +811,23 @@ class MethodTrail:
                     contract, current_change, candidate, run, "edit", repair_step
                 )
             else:
+                changed_paths.update(edit.path for edit in current_plan.edits)
+                cumulative_diff = self.workspaces.cumulative_diff(
+                    workspace, parent_sources, contract, changed_paths
+                )
                 implementation_id = self.store.put(
                     "implementation",
                     {
                         "workspace": str(workspace),
                         "variant_id": candidate.variant_id,
                         "diff": diff,
+                        "cumulative_diff": cumulative_diff,
                         "entrypoint": contract.solution_entrypoint,
                         "repair_step": repair_step,
                     },
                     [current_plan_id],
                 )
-                patch_signature = hashlib.sha256(diff.encode("utf-8")).hexdigest()
+                patch_signature = hashlib.sha256(cumulative_diff.encode("utf-8")).hexdigest()
                 if patch_signature in seen_patch_signatures:
                     # A byte-identical repair cannot provide new semantic
                     # evidence. Keep a structured failure for Recovery/Coding
@@ -839,12 +849,12 @@ class MethodTrail:
                     seen_patch_signatures.add(patch_signature)
                     review = self.implementation_reviewer.review(
                         contract,
-                        current_change,
+                        change,
                         current_plan,
-                        diff,
+                        cumulative_diff,
                         RepoMap(workspace).retrieve(
                             f"{current_change.research_question} {current_change.title}",
-                            full_paths=set(contract.editable_paths),
+                            full_paths=set(contract.editable_paths or [contract.solution_entrypoint]),
                         ),
                         known_failures=self.bug_memory.guidance(contract.task_id, limit=12),
                         initial_candidate=candidate.parent_variant_id is None,
@@ -987,18 +997,49 @@ class MethodTrail:
                     "rationale": recovery.diagnosis,
                 }
             )
-            repair_plan = self.coding.repair(
-                contract,
-                repair_change,
-                run,
-                recovery,
-                RepoMap(workspace).retrieve(
-                    f"{change.research_question} {recovery.diagnosis}",
-                    full_paths=set(contract.editable_paths),
-                ),
-                known_failures=known_failures,
-                implementation_review=last_review,
-            )
+            repair_input = run
+            while True:
+                try:
+                    repair_plan = self.coding.repair(
+                        contract,
+                        repair_change,
+                        repair_input,
+                        recovery,
+                        RepoMap(workspace).retrieve(
+                            f"{change.research_question} {recovery.diagnosis}",
+                            full_paths=set(contract.editable_paths or [contract.solution_entrypoint]),
+                        ),
+                        known_failures=known_failures,
+                        implementation_review=last_review,
+                    )
+                    break
+                except LLMOutputValidationError as exc:
+                    # No patch was applied. Correct the response using fresh
+                    # source and the original outstanding review/run issues;
+                    # never reapply the last plan or consume a research round.
+                    invalid_run = RunArtifact(
+                        command=contract.run_command,
+                        return_code=-9,
+                        timed_out=False,
+                        wall_seconds=0.0,
+                        stdout="",
+                        stderr=f"repair plan validation failed: {exc}",
+                    )
+                    invalid_id = self.store.put("repair_plan_error", invalid_run, [recovery_id])
+                    repair_ids.append(invalid_id)
+                    self._record_bug(
+                        contract, change, candidate, invalid_run, "planning", repair_step
+                    )
+                    if (
+                        repair_step >= contract.max_repair_steps
+                        or time.monotonic() - started >= max(1, remaining_seconds)
+                    ):
+                        return invalid_run, invalid_id, repair_ids, last_recovery
+                    repair_step += 1
+                    repair_input = run.model_copy(update={
+                        "stderr": invalid_run.stderr + "\nOutstanding original failure:\n" + run.stderr,
+                    })
+                    known_failures = self.bug_memory.guidance(contract.task_id, limit=12)
             current_plan = repair_plan
             current_change = repair_change
             current_plan_id = self.store.put("repair_plan", repair_plan, [recovery_id])
@@ -1089,6 +1130,27 @@ class MethodTrail:
                         },
                     )
                 break
+            except Exception as exc:
+                # Preserve a truthful resumable state on unexpected planning,
+                # schema, API or controller failures. Never leave a dead
+                # process labelled active in the monitor.
+                if callable(set_deadline):
+                    set_deadline(None)
+                if self.project is not None and self.session is not None:
+                    self.projects.append_event(
+                        self.project, self.session.session_id, "research_interrupted",
+                        {"reason": f"{type(exc).__name__}: {str(exc)[:1800]}"},
+                    )
+                    self.projects.update_session(self.project, self.session, status="interrupted")
+                    try:
+                        self.export_dashboard(
+                            self.projects.project_path(self.project) / "sessions"
+                            / self.session.session_id / "dashboard.html",
+                            project_id=self.project.project_id, session_id=self.session.session_id,
+                        )
+                    except Exception as dashboard_error:  # noqa: BLE001 - preserve the original failure.
+                        logger.debug("interrupted dashboard export failed: %s", dashboard_error)
+                raise
             results.append(result)
             # The budget covers the complete research turn, including LLM
             # planning, code editing and execution—not only the Python process.
@@ -1210,6 +1272,8 @@ class MethodTrail:
 
         if metric is None or self.project is None or self.project.incumbent_metric is None:
             return metric is not None
+        if math.isclose(metric, self.project.incumbent_metric, rel_tol=1e-12, abs_tol=1e-12):
+            return False
         if contract.maximize_metric:
             return metric > self.project.incumbent_metric
         return metric < self.project.incumbent_metric
