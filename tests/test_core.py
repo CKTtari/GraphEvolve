@@ -951,6 +951,59 @@ def test_workspace_verifier_and_executor(tmp_path: Path) -> None:
     assert run.output_files == ["predictions.csv"]
 
 
+def test_executor_does_not_treat_legacy_timeout_as_single_run_kill(tmp_path: Path) -> None:
+    template = tmp_path / "template"
+    template.mkdir()
+    contract = TaskContract(
+        task_id="long-toy",
+        description="long toy",
+        workspace_template=str(template),
+        allowed_data_paths=[],
+        run_command=[
+            sys.executable,
+            "-c",
+            "import time, json; time.sleep(2); open('predictions.csv','w').write('x\\n'); json.dump({'score': 1}, open('metrics.json','w'))",
+        ],
+        metric_name="score",
+        required_outputs=["predictions.csv"],
+        timeout_seconds=1,
+        execution_check_interval_seconds=1,
+        allow_self_reported_metric=True,
+    )
+    workspace = WorkspaceManager(tmp_path / "runs").create(template)
+    run = Executor().run(workspace, contract)
+    assert run.return_code == 0
+    assert run.metric == 1.0
+    assert run.timed_out is False
+    assert run.execution_checkpoints
+
+
+def test_executor_monitor_can_stop_an_abnormal_long_run(tmp_path: Path) -> None:
+    template = tmp_path / "template"
+    template.mkdir()
+    contract = TaskContract(
+        task_id="monitor-toy",
+        description="monitor toy",
+        workspace_template=str(template),
+        allowed_data_paths=[],
+        run_command=[sys.executable, "-c", "import time; time.sleep(10)"],
+        metric_name="resolved",
+        execution_check_interval_seconds=1,
+    )
+    workspace = WorkspaceManager(tmp_path / "runs").create(template)
+    run = Executor().run(
+        workspace,
+        contract,
+        progress_callback=lambda checkpoint: {
+            "action": "terminate",
+            "reason": "test monitor observed no progress",
+        },
+    )
+    assert run.return_code != 0
+    assert run.timed_out is False
+    assert run.termination_reason == "test monitor observed no progress"
+
+
 def test_workspace_applies_only_a_unique_local_replacement(tmp_path: Path) -> None:
     workspace = tmp_path / "workspace"
     workspace.mkdir()

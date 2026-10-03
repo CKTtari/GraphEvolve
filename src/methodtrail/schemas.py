@@ -53,6 +53,12 @@ class TaskContract(BaseModel):
     maximize_metric: bool = True
     allow_self_reported_metric: bool = False
     timeout_seconds: int = Field(default=1800, ge=1)
+    # `timeout_seconds` is retained for older adapters and task contracts.  It
+    # is no longer used as an implicit per-command kill switch.  Long-running
+    # experiments are checked periodically and are bounded by the research
+    # session deadline or this explicit hard cap when one is requested.
+    execution_check_interval_seconds: int = Field(default=300, ge=1)
+    execution_hard_timeout_seconds: int | None = Field(default=None, ge=1)
     # Keep a small tail of the research budget for final output, trajectory
     # writing and a last repair decision.  A candidate must fit before this
     # reserve is consumed; it is not counted as a research round.
@@ -111,6 +117,12 @@ class TaskContract(BaseModel):
                 "Code may report public validation metrics, but must not print, "
                 "guess, or hard-code the private score."
             )
+        context["execution_policy"] = {
+            "check_interval_seconds": self.execution_check_interval_seconds,
+            "hard_timeout_seconds": self.execution_hard_timeout_seconds,
+            "legacy_timeout_seconds_is_not_a_kill_switch": True,
+            "research_budget_is_the_outer_deadline": True,
+        }
         return context
 
 
@@ -257,6 +269,15 @@ class RunArtifact(BaseModel):
     metrics: dict[str, float] = Field(default_factory=dict)
     metric_constraints_passed: bool | None = None
     output_files: list[str] = Field(default_factory=list)
+    termination_reason: str | None = None
+    execution_checkpoints: list[dict[str, Any]] = Field(default_factory=list)
+
+
+class ExecutionDecisionArtifact(BaseModel):
+    """Decision made from a live checkpoint of a still-running experiment."""
+
+    action: Literal["continue", "terminate"] = "continue"
+    reason: str
 
 
 class AssessmentArtifact(BaseModel):
@@ -265,6 +286,10 @@ class AssessmentArtifact(BaseModel):
     reusable_conclusion: str | None = None
     applicable_conditions: list[str] = Field(default_factory=list)
     next_question: str | None = None
+    # Evidence loops must state whether the current comparison remains open.
+    # A resolved or inconclusive question is closed instead of automatically
+    # spawning another near-duplicate Evidence Agent call.
+    question_status: Literal["open", "resolved", "inconclusive", "frontier"] = "open"
 
 
 class RecoveryArtifact(BaseModel):

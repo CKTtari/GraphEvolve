@@ -166,6 +166,8 @@ A task starts with a JSON contract. It declares public input files, editable sou
       "metric_name": "accuracy",
       "maximize_metric": true,
       "timeout_seconds": 900,
+      "execution_check_interval_seconds": 300,
+      "execution_hard_timeout_seconds": null,
       "max_repair_steps": 100,
       "minimum_iterations": 3,
       "allowed_dependencies": ["numpy", "pandas", "scikit-learn"],
@@ -177,6 +179,8 @@ The workspace template contains public inputs only. A private evaluator can cont
     {"accuracy": 0.84}
 
 For a public task, use evaluation_command instead of the private-evaluator fields. Self-reported metrics are intended only for quick smoke tasks.
+
+`timeout_seconds` remains accepted for older task adapters but is no longer an implicit per-command kill switch. By default, a running experiment is checked every `execution_check_interval_seconds`; the execution monitor can request termination when logs or outputs show a real failure. Set `execution_hard_timeout_seconds` only when a task explicitly requires a single-run cap. The research session's total budget remains the outer deadline.
 
 ## Run and manage projects
 

@@ -16,6 +16,7 @@ from .agents import (
     AssessmentMemoryAgent,
     CodingAgent,
     EvidenceAgent,
+    ExecutionMonitorAgent,
     ImplementationReviewAgent,
     MethodGraphAgent,
     QuestionAgent,
@@ -138,6 +139,7 @@ class MethodTrail:
         self.coding = CodingAgent(llm)
         self.implementation_reviewer = ImplementationReviewAgent(llm)
         self.evidence = EvidenceAgent(llm)
+        self.execution_monitor = ExecutionMonitorAgent(llm)
         self.recovery = RepairAgent(llm)
         self.assessment_memory = AssessmentMemoryAgent(llm)
         self.assess = self.assessment_memory.assess_agent
@@ -774,7 +776,28 @@ class MethodTrail:
         last_review: ImplementationReviewArtifact | None = None
         seen_patch_signatures: set[str] = set()
         parent_sources = self.workspaces.source_snapshot(workspace, contract)
+        parent_context = [
+            {
+                "path": path,
+                "content": content,
+                "language": Path(path).suffix.lstrip(".") or "text",
+                "complete": "true",
+                "retrieval_reason": "immutable source snapshot captured before the first edit",
+            }
+            for path, content in sorted(parent_sources.items())
+        ]
         changed_paths: set[str] = set()
+
+        def monitor(checkpoint: dict[str, Any]) -> Any:
+            """Ask the monitor role at checkpoints; a failed monitor is non-fatal."""
+
+            try:
+                return self.execution_monitor.decide(
+                    contract, state, current_change, checkpoint
+                )
+            except Exception as exc:  # noqa: BLE001 - never kill healthy work
+                checkpoint["monitor_error"] = f"{type(exc).__name__}: {str(exc)[:240]}"
+                return {"action": "continue", "reason": "monitor unavailable; continue"}
 
         while True:
             if time.monotonic() - started >= max(1, remaining_seconds):
@@ -858,6 +881,7 @@ class MethodTrail:
                         ),
                         known_failures=self.bug_memory.guidance(contract.task_id, limit=12),
                         initial_candidate=candidate.parent_variant_id is None,
+                        parent_context=parent_context,
                     )
                 review_id = self.store.put(
                     "implementation_review" if repair_step == 0 else "repair_implementation_review",
@@ -925,7 +949,12 @@ class MethodTrail:
                         [review_id],
                     )
                     if verification.passed:
-                        run = self.executor.run(workspace, contract)
+                        run = self.executor.run(
+                            workspace,
+                            contract,
+                            deadline_monotonic=time.monotonic() + max(1, remaining_seconds),
+                            progress_callback=monitor,
+                        )
                         run_id = self.store.put(
                             "run" if repair_step == 0 else "repair_run",
                             run,
@@ -1011,6 +1040,7 @@ class MethodTrail:
                         ),
                         known_failures=known_failures,
                         implementation_review=last_review,
+                        parent_context=parent_context,
                     )
                     break
                 except LLMOutputValidationError as exc:
@@ -1390,13 +1420,27 @@ class MethodTrail:
                     tags=[change.title, change.mutation_class.value, change.relation, *memory.applicable_conditions],
                 )
             )
-            next_hypothesis = self.evidence.investigate(
-                contract, state, run, assessment
-            )
-            evidence_id = self.store.put(
-                "evidence_question", next_hypothesis, [artifact_ids["assessment"]]
-            )
-            artifact_ids["evidence"] = evidence_id
+            if assessment.question_status in {"resolved", "inconclusive"}:
+                # The current comparison is closed.  Do not automatically ask
+                # Evidence Agent to restate the same unresolved question; the
+                # next research round starts from the graph frontier.
+                next_hypothesis = None
+                artifact_ids["evidence_closure"] = self.store.put(
+                    "evidence_closure",
+                    {
+                        "status": assessment.question_status,
+                        "reason": assessment.reason,
+                    },
+                    [artifact_ids["assessment"]],
+                )
+            else:
+                next_hypothesis = self.evidence.investigate(
+                    contract, state, run, assessment
+                )
+                evidence_id = self.store.put(
+                    "evidence_question", next_hypothesis, [artifact_ids["assessment"]]
+                )
+                artifact_ids["evidence"] = evidence_id
             self.projects.record_candidate(
                 self.project, candidate, status="needs_evidence", metric=run.metric
             )
@@ -1406,7 +1450,7 @@ class MethodTrail:
                 change,
                 run,
                 assessment,
-                next_hypothesis.hypothesis,
+                next_hypothesis.hypothesis if next_hypothesis else None,
                 artifact_ids,
                 completed_research=True,
             )

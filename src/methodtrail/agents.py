@@ -12,6 +12,7 @@ from .schemas import (
     CandidateSelectionArtifact,
     ChangeRequestArtifact,
     CodePlanArtifact,
+    ExecutionDecisionArtifact,
     HypothesisArtifact,
     ImplementationReviewArtifact,
     RecoveryArtifact,
@@ -43,6 +44,16 @@ def _short(value: Any, limit: int) -> Any:
     if not isinstance(value, str) or len(value) <= limit:
         return value
     return value[: max(0, limit - 32)] + f" ...[truncated {len(value) - limit} chars]"
+
+
+def _compact_log(value: Any, limit: int = 7000) -> Any:
+    """Keep both the beginning and traceback/metric tail of process logs."""
+
+    if not isinstance(value, str) or len(value) <= limit:
+        return value
+    head = max(1200, limit // 3)
+    tail = limit - head - 80
+    return value[:head] + f"\n...[truncated {len(value) - limit} chars]...\n" + value[-tail:]
 
 
 def _compact_method(value: Any) -> dict[str, Any]:
@@ -255,8 +266,10 @@ def _compact_plan(value: Any) -> dict[str, Any]:
 def _compact_run(value: Any) -> dict[str, Any]:
     if not isinstance(value, dict):
         return {"value": _short(value, 1200)}
-    return {
-        key: _short(value.get(key), 7000 if "stdout" in key or "stderr" in key else 700)
+    result = {
+        key: _compact_log(value.get(key), 7000)
+        if "stdout" in key or "stderr" in key
+        else _short(value.get(key), 700)
         for key in (
             "command",
             "return_code",
@@ -270,9 +283,37 @@ def _compact_run(value: Any) -> dict[str, Any]:
             "evaluation_stdout",
             "evaluation_stderr",
             "output_files",
+            "termination_reason",
         )
         if value.get(key) not in (None, "", [], {})
     }
+    checkpoints = value.get("execution_checkpoints") or []
+    if checkpoints:
+        result["execution_checkpoints"] = [
+            {
+                key: _compact_log(item.get(key), 1400)
+                if key in {"stdout_tail", "stderr_tail"}
+                else _short(item.get(key), 500)
+                for key in (
+                    "stage",
+                    "elapsed_seconds",
+                    "process_running",
+                    "output_bytes",
+                    "output_growth",
+                    "metric_file_exists",
+                    "monitor_action",
+                    "monitor_reason",
+                    "stdout_tail",
+                    "stderr_tail",
+                    "monitor_error",
+                    "final",
+                )
+                if item.get(key) not in (None, "", [], {})
+            }
+            for item in checkpoints[-8:]
+            if isinstance(item, dict)
+        ]
+    return result
 
 
 def _compact_state(value: Any) -> dict[str, Any]:
@@ -379,7 +420,7 @@ def _compact_payload(key: str, value: Any) -> Any:
         return value
     if key in {"ranked_candidates", "candidates"} and isinstance(value, list):
         return [_compact_candidate(item) for item in value[:40]]
-    if key in {"repository_context", "repo_context"} and isinstance(value, list):
+    if key in {"repository_context", "repo_context", "parent_context"} and isinstance(value, list):
         compact = []
         for item in value:
             if isinstance(item, dict):
@@ -626,6 +667,7 @@ change a small source-level constant; keep that edit local and explicit.""",
         repo_context: list[dict[str, str]],
         known_failures: list[dict[str, Any]] | None = None,
         implementation_review: ImplementationReviewArtifact | None = None,
+        parent_context: list[dict[str, str]] | None = None,
     ) -> CodePlanArtifact:
         user = _context(
             """Repair the implementation that just failed. Read the recorded stderr, diagnosis, and current
@@ -644,12 +686,17 @@ implementation_review object is present, treat its failed checks and issues as
 an acceptance checklist: fix each named issue with the smallest local edit,
 preserve every other parent component, and do not rewrite the whole entrypoint
 just to silence the review. Put one concrete check per review issue in
-invariant_checks.""",
+         invariant_checks. The immutable parent_context is the source of truth
+         for the version selected by the research agent. Compare it with the
+         current repository before editing; do not reconstruct an earlier
+         parent from a summary or stale diff. Keep earlier valid patches and
+         make the smallest edit against the latest source.""",
             contract=contract,
             change=change,
             run=run,
             recovery=recovery,
             implementation_review=implementation_review,
+            parent_context=parent_context or [],
             repository_context=repo_context,
             known_failures=known_failures or [],
         )
@@ -664,6 +711,7 @@ invariant_checks.""",
         repo_context: list[dict[str, str]],
         known_failures: list[dict[str, Any]] | None = None,
         initial_candidate: bool = False,
+        parent_context: list[dict[str, str]] | None = None,
     ) -> ImplementationReviewArtifact:
         """Compatibility wrapper for callers of the earlier Coding API."""
 
@@ -675,6 +723,7 @@ invariant_checks.""",
             repo_context,
             known_failures=known_failures,
             initial_candidate=initial_candidate,
+            parent_context=parent_context,
         )
 
 
@@ -699,6 +748,7 @@ class ImplementationReviewAgent:
         repo_context: list[dict[str, str]],
         known_failures: list[dict[str, Any]] | None = None,
         initial_candidate: bool = False,
+        parent_context: list[dict[str, str]] | None = None,
     ) -> ImplementationReviewArtifact:
         # Lightweight test doubles and custom providers can opt out. They still
         # go through WorkspaceManager and Verifier; production providers opt in
@@ -740,7 +790,10 @@ decision="repair", and give concrete source-level issues. A replan returns to
 candidate selection in the same research round; neither outcome counts as
 measured evidence. During technical repair, earlier patches remain in the current source and cumulative diff:
 judge the complete resulting implementation, not whether the latest small patch repeats every earlier change.
-Do not add requirements beyond the selected contract and required invariants. Set decision="pass" only when passed=true.""",
+Do not add requirements beyond the selected contract and required invariants. Set decision="pass" only when passed=true.
+The parent_context is immutable evidence of the code version this candidate was
+supposed to extend. List any removed parent component explicitly and check that
+the ChangeRequest relation and changed_factors authorize that removal.""",
             contract=contract,
             change=change,
             plan=plan,
@@ -748,8 +801,36 @@ Do not add requirements beyond the selected contract and required invariants. Se
             repository_context=repo_context,
             known_failures=known_failures or [],
             initial_candidate=initial_candidate,
+            parent_context=parent_context or [],
         )
         return self.llm.complete(SYSTEM, user, ImplementationReviewArtifact)
+
+
+class ExecutionMonitorAgent:
+    """Decides whether a long-running process is healthy enough to continue."""
+
+    def __init__(self, llm: StructuredLLM) -> None:
+        self.llm = llm
+
+    def decide(
+        self,
+        contract: TaskContract,
+        state: ResearchState,
+        change: ChangeRequestArtifact,
+        checkpoint: dict[str, Any],
+    ) -> ExecutionDecisionArtifact:
+        user = _context(
+            """Inspect this live execution checkpoint. Continue by default: elapsed time alone is never a reason to
+terminate a valid experiment. Terminate only when the process is clearly stuck, repeatedly emitting the same fatal
+error, violating the task contract, or producing an unrecoverable resource/format failure. Normal sparse logging,
+long model training, and delayed metric files are healthy possibilities. If termination is requested, state the exact
+observable evidence so Repair Agent can act on it. Do not change the research question or score the experiment.""",
+            contract=contract,
+            state=state,
+            change=change,
+            checkpoint=checkpoint,
+        )
+        return self.llm.complete(SYSTEM, user, ExecutionDecisionArtifact)
 
 
 class EvidenceAgent:
@@ -831,7 +912,12 @@ incumbent and all declared constraints pass. A worse but informative or
 promising result should remain in the method graph as evidence or deferred
 work; it must not replace the incumbent. Choose 'evidence' when the next step
 should isolate uncertainty, 'defer' for a promising but currently inferior
-result, and 'stop' only when no useful executable path remains.""",
+result, and 'stop' only when no useful executable path remains. Set
+question_status='resolved' when the declared comparison is answered, or
+'inconclusive' when repeating the same protocol would not add evidence. Use
+'open' or 'frontier' only when the next question requires a materially
+different experiment. A resolved or inconclusive question must not request a
+near-duplicate Evidence Agent follow-up.""",
             contract=contract,
             state=state,
             change=change,
