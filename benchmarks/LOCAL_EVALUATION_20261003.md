@@ -5,7 +5,7 @@ scores. Metrics with different units are reported separately.
 
 | Task | Same-backbone MLEvolve RSI baseline | GraphEvolve latest measured result | Comparison |
 | --- | --- | --- | --- |
-| spooky (log loss, lower better) | 0.345936 | v10: 0.356831; 7 measured rounds, interrupted during round 8 | GraphEvolve loses |
+| spooky (log loss, lower better) | 0.345936 | v11: 0.354273; 20 measured rounds, completed | GraphEvolve loses |
 | insults (ROC-AUC, higher better) | 0.916840; interrupted after 3/8 steps | 0.912351; 12 measured rounds | GraphEvolve loses; baseline run incomplete |
 | NOMAD (mean-column-wise RMSLE, lower better) | 0.063968; 8 steps | 0.062517; 6 measured rounds | GraphEvolve wins on the CSV-only task |
 
@@ -59,8 +59,56 @@ those observations alone are not a controlled comparison of system designs.
 
 ## Follow-up
 
-The repaired controller is to be evaluated in a new isolated project, with a
-fresh five-hour budget and 20 research rounds. v10's artifacts, failures and
-scores remain intact. A follow-up run is pending until its first independently
-measured result is available; it must not be reported as completed or as a
-performance improvement based only on regression tests.
+v11 completed 20 measured rounds at **16:49 China time on October 3**,
+under source revision `5a446c8`. It stopped at the research-round limit,
+with time remaining. The host reboot interrupted its first attempt; the user
+confirmed another application caused the OOM. Continuation preserved the
+same project and session and used the remaining original budget.
+
+Project: `mle-lite-spooky-graphevolve-5h-20261003-v11`.
+Session: `0cbc63f4435743e29f78ef9de7c42adb`.
+
+The best and final measured log loss were both **0.3542728330169538**.
+Independent reevaluation of the saved incumbent file reproduced that value
+exactly. The best method used concatenated character TF-IDF (2–6 grams),
+word unigrams and half-weighted word bigrams with logistic regression;
+the public validation sweep selected C=16. It improved on v10, but remained
+worse than MLEvolve's 0.345936 and historical v6's 0.314828.
+
+The resumed run took about 91 minutes. Across both pre-reboot and resumed
+segments there were 245 logged LLM calls, zero logged LLM errors and about
+64.5 minutes of LLM request time. Repair resolved seven candidates. Four
+candidate-contract rejections returned to replanning within a research
+round; they did not count as measured experiments.
+
+The measured path was:
+
+| Round | Main change | Log loss |
+| --- | --- | --- |
+| 1 | Character-only reference | 0.418143 |
+| 3 | Character plus word-unigram features | 0.372251 |
+| 5 | Downweight word bigrams | 0.366735 |
+| 6 | Word-feature ComplementNB control | 0.645893 |
+| 8–13 | Separate-expert blends and normalization | 0.413378 to 0.366735 |
+| 14 | Regularization-strength sweep | 0.354273 |
+| 15–20 | Probability checks, further regularization, validation and serialization diagnostics | 0.354273 throughout |
+
+The late search still spent research rounds investigating an evaluator
+normalization warning. In the final incumbent CSV, the largest row-sum error
+was **1.2014e-7**, within the independent evaluator's accepted tolerance.
+Normalizing the rows before reevaluation gave 0.35427284002426795, a change
+of approximately **7e-9**. This recorded diagnostic has negligible score
+impact; it does not establish a new predictive direction. Technical warnings
+still need a clearer boundary from research uncertainty, and repeated
+diagnostics should not become the entire experiment trajectory.
+
+The auxiliary monitor initially asserted a stricter row-sum tolerance than
+the evaluator and assumed a categorical label column, although the private
+labels use three one-hot columns. Those monitor checks were corrected to
+reproduce the actual evaluator. The final completion snapshot and dashboard
+now agree with the persisted completed session. No research-source change
+was made during this audit.
+
+The insults and NOMAD GraphEvolve scores above are earlier runs, not reruns
+under `5a446c8`. A six-score comparison of fully completed baseline runs and
+the latest controller on all three tasks therefore remains unfinished.
