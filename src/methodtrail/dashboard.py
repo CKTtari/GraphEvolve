@@ -166,7 +166,7 @@ function colorTokens(n){
   (Array.isArray(factors)?factors:[factors]).forEach(value=>add(value,2));
   const components=n.method_components || n.method?.components || {};
   Object.entries(components||{}).forEach(([key,value])=>{add(key,1);add(value,2);});
-  return new Set(values);
+  return values;
 }
 function colorDistance(a,b){
   const left=colorTokens(a), right=colorTokens(b);
