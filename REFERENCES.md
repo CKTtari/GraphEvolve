@@ -20,6 +20,25 @@ Awesome RSI describes recursive self-improvement across memory, harness and prom
 
 Source: https://github.com/lobehub/awesome-rsi
 
+## Open-ended evolutionary search
+
+Recent RSI-style coding systems converge on archive-based search rather than a
+single hill-climbing chain. Darwin Gödel Machine keeps a growing tree of agent
+variants and can branch from lower-scoring stepping stones; parent selection
+balances measured quality with exploration. AlphaEvolve pairs an automated
+evaluator with an evolutionary program database, while ShinkaEvolve adds
+novelty rejection and exploration/exploitation parent sampling. These systems
+do not use a fixed “stop after N bad rounds” rule as their main diversity
+mechanism; they keep the best checkpoint and allocate further evaluations to
+promising or underexplored archive regions until a budget or explicit stopping
+condition is reached.
+
+Sources:
+
+- https://arxiv.org/abs/2505.22954
+- https://deepmind.google/blog/alphaevolve-a-gemini-powered-coding-agent-for-designing-advanced-algorithms/
+- https://arxiv.org/abs/2509.19349
+
 ## Engineering choice
 
 MethodTrail combines the two directions as follows:
@@ -27,5 +46,8 @@ MethodTrail combines the two directions as follows:
 - an outer research process selects hypotheses and experiment paths;
 - an inner Coding Agent produces implementation artifacts and repair patches;
 - an experiment-path graph stores code lineage and evidence relationships;
-- the value model orders paths using expected gain, information value, runtime, and execution risk;
+- the value model orders paths using expected gain, information value, runtime,
+  execution risk, and a bounded plateau-triggered novelty/uncertainty bonus;
+- the best checkpoint is retained while a persistent plateau counter increases
+  exploration pressure; this counter is not a stopping counter;
 - layered evaluation filters broken or incompatible code before full training.

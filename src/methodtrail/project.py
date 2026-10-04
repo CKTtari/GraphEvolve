@@ -47,8 +47,8 @@ class SessionRecord:
     updated_at: str
     current_variant_id: str | None = None
     next_question: str | None = None
-    # Deprecated compatibility field.  New stopping logic uses the
-    # direction-aware deterioration counter below.
+    # Number of completed research rounds that did not beat the best
+    # checkpoint. It raises exploration pressure; it is not a stop counter.
     consecutive_non_improving: int = 0
     consecutive_deteriorating: int = 0
     last_metric: float | None = None

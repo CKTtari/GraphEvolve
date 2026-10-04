@@ -133,6 +133,7 @@ class ResearchState(BaseModel):
     best_metric: float | None = None
     incumbent_metric: float | None = None
     incumbent_variant_id: str | None = None
+    plateau_rounds: int = 0
     research_round: int = 0
     repair_step: int = 0
     recent_facts: list[str] = Field(default_factory=list)
@@ -346,6 +347,7 @@ class ValueWeights(BaseModel):
     beta: float = Field(default=1.0, ge=0.0)
     gamma: float = Field(default=1.0, ge=0.0)
     delta: float = Field(default=1.0, ge=0.0)
+    exploration: float = Field(default=0.35, ge=0.0)
 
     @classmethod
     def for_stage(cls, remaining_fraction: float, has_incumbent: bool) -> ValueWeights:
@@ -357,12 +359,12 @@ class ValueWeights(BaseModel):
         """
         fraction = min(1.0, max(0.0, remaining_fraction))
         if not has_incumbent:
-            return cls(alpha=0.8, beta=1.2, gamma=0.9, delta=1.0)
+            return cls(alpha=0.8, beta=1.2, gamma=0.9, delta=1.0, exploration=0.25)
         if fraction < 0.25:
-            return cls(alpha=1.0, beta=0.8, gamma=1.3, delta=1.3)
+            return cls(alpha=1.0, beta=0.8, gamma=1.3, delta=1.3, exploration=0.45)
         if fraction > 0.5:
-            return cls(alpha=1.2, beta=1.0, gamma=1.0, delta=1.1)
-        return cls(alpha=1.0, beta=1.0, gamma=1.1, delta=1.15)
+            return cls(alpha=1.2, beta=1.0, gamma=1.0, delta=1.1, exploration=0.30)
+        return cls(alpha=1.0, beta=1.0, gamma=1.1, delta=1.15, exploration=0.40)
 
     @classmethod
     def for_search_policy(

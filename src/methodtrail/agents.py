@@ -213,6 +213,12 @@ def _compact_candidate(value: Any) -> dict[str, Any]:
                 "method_family",
                 "family_outcome_count",
                 "family_unproductive_count",
+                "semantic_outcome_count",
+                "semantic_unproductive_count",
+                "semantic_novelty",
+                "uncertainty",
+                "plateau_rounds",
+                "plateau_pressure",
                 "novel_changed_factors",
                 "exact_measured",
                 "factor_stuck",
@@ -333,6 +339,7 @@ def _compact_state(value: Any) -> dict[str, Any]:
             "best_metric",
             "incumbent_metric",
             "incumbent_variant_id",
+            "plateau_rounds",
             "research_round",
             "repair_step",
         )
@@ -481,6 +488,18 @@ changes belong to technical maintenance unless recorded evidence identifies an u
 the research conclusion. Prefer a substantive predictive or validation question over rechecking already satisfied
 output invariants. After two consecutive non-improving experiments that share
 the same changed factors, prefer a backtrack to a measured ancestor or an orthogonal method family."""
+        plateau_rounds = int(getattr(state, "plateau_rounds", 0) or 0)
+        if plateau_rounds >= 2:
+            instruction += f"""
+
+The archive has been on a plateau for {plateau_rounds} completed rounds without a new best primary metric. Enter
+exploration mode: do not formulate another cosmetic calibration, aggregation, or regularization tweak solely because
+its family name is new. Compare the current branch against the complete directed archive, identify the least-tested
+semantic region or an older measured ancestor worth revisiting, and make the next question test an orthogonal method
+family, component, representation, model, objective, or data protocol. Preserve the current best checkpoint as the
+fallback and explain why the proposed branch is meaningfully farther from the recent plateau. A lower-scoring branch
+is allowed when it tests a high-value unresolved alternative; it must remain an archived stepping stone rather than
+replace the incumbent without evidence."""
         user = _context(
             instruction,
             contract=contract,
@@ -526,6 +545,18 @@ proposals and aim to rank at least four distinct executable choices when availab
 local calibration improvement does not make all other representation families
 ineligible."""
         )
+        plateau_rounds = int(getattr(state, "plateau_rounds", 0) or 0)
+        if plateau_rounds >= 2:
+            phase_instruction += f"""
+
+The search is in plateau exploration mode ({plateau_rounds} rounds without a new best primary metric). The candidate
+batch must preserve the best checkpoint as a control, but it must also contain at least one executable branch that is
+semantically distant from the recent plateau or explicitly backtracks to an older measured ancestor. Treat a new
+method_family label as insufficient novelty when method components and changed factors remain substantially the same.
+Use the directed graph and archive coverage to identify what is genuinely unmeasured. Spend no more than one candidate
+on another local calibration/aggregation refinement unless it is required as a control for the orthogonal experiment.
+Do not name a task-specific method merely to satisfy this rule; describe the untested region in terms of the task
+contract and method metadata."""
         if coverage_feedback:
             phase_instruction += f"\n\nProgrammatic coverage review found a gap:\n{coverage_feedback}\nRevise the candidate batch to close this gap while keeping every candidate executable and tied to the hypothesis."
         if constraint_feedback:

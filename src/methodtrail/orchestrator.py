@@ -223,6 +223,15 @@ class MethodTrail:
                 limit=3, maximize_metric=contract.maximize_metric
             ),
         )
+        if state.plateau_rounds >= 2:
+            plateau_gap = (
+                "The best checkpoint has not been exceeded for at least two completed research rounds. "
+                "The candidate batch must include at least one executable branch that is semantically distant "
+                "from the recent plateau or explicitly backtracks to an older measured ancestor; a renamed "
+                "calibration or aggregation variant is not sufficient novelty. Keep one local control only "
+                "when it is needed to interpret the orthogonal branch."
+            )
+            coverage_gap = f"{coverage_gap}\n{plateau_gap}" if coverage_gap else plateau_gap
         if coverage_gap:
             # One bounded revision pass prevents a narrow initial proposal set
             # from becoming the entire search space.  It keeps the same
@@ -288,6 +297,7 @@ class MethodTrail:
             weights,
             maximize_metric=contract.maximize_metric,
             reserve_seconds=reserve_seconds,
+            plateau_rounds=state.plateau_rounds,
         )
         candidate_indices = {candidate.variant_id: index for index, candidate in enumerate(candidates)}
         for candidate_path, priority in ranked:
@@ -301,6 +311,7 @@ class MethodTrail:
                     decision_remaining,
                     reserve_seconds=reserve_seconds,
                     maximize_metric=contract.maximize_metric,
+                    plateau_rounds=state.plateau_rounds,
                 ),
                 "candidate": candidate.model_dump(mode="json"),
             }
@@ -319,6 +330,8 @@ class MethodTrail:
                 "comparison_floor": MIN_COMPARISON_CANDIDATES,
                 "comparison_count": len(ranked_payload),
                 "comparison_floor_met": len(ranked_payload) >= MIN_COMPARISON_CANDIDATES,
+                "plateau_rounds": state.plateau_rounds,
+                "exploration_pressure": min(1.0, state.plateau_rounds / 3.0),
                 "weights": weights.model_dump(mode="json"),
                 "ranked": ranked_payload,
             },
@@ -1109,6 +1122,9 @@ class MethodTrail:
         results: list[IterationResult] = []
         completed_rounds = 0
         consecutive_replans = 0
+        plateau_rounds = (
+            self.session.consecutive_non_improving if self.session is not None else 0
+        )
         consecutive_deteriorating = (
             self.session.consecutive_deteriorating if self.session is not None else 0
         )
@@ -1130,6 +1146,7 @@ class MethodTrail:
                     )
                 break
             iteration_started = time.monotonic()
+            best_before = self.project.incumbent_metric if self.project is not None else None
             try:
                 result = self.run_iteration(
                     contract,
@@ -1217,8 +1234,15 @@ class MethodTrail:
                 consecutive_replans = 0
                 completed_rounds += 1
                 measured = result.run.metric if result.run else None
-                prior_metric = previous_metric
                 if measured is not None:
+                    if best_before is None or (
+                        measured > best_before
+                        if contract.maximize_metric
+                        else measured < best_before
+                    ):
+                        plateau_rounds = 0
+                    else:
+                        plateau_rounds += 1
                     deteriorated = _metric_deteriorated(
                         previous_metric, measured, contract.maximize_metric
                     )
@@ -1230,30 +1254,10 @@ class MethodTrail:
                     self.projects.update_session(
                         self.project,
                         self.session,
+                        consecutive_non_improving=plateau_rounds,
                         consecutive_deteriorating=consecutive_deteriorating,
                         last_metric=measured,
                     )
-                if (
-                    completed_rounds >= contract.minimum_iterations
-                    and consecutive_deteriorating >= 4
-                ):
-                    if self.project is not None and self.session is not None:
-                        self.projects.append_event(
-                            self.project,
-                            self.session.session_id,
-                            "research_stop",
-                            {
-                                "reason": (
-                                    "four consecutive completed rounds deteriorated "
-                                    "relative to the immediately preceding completed round"
-                                ),
-                                "completed_rounds": completed_rounds,
-                                "consecutive_deteriorating": consecutive_deteriorating,
-                                "previous_metric": prior_metric,
-                                "metric": measured,
-                            },
-                        )
-                    break
             if (
                 result.assessment
                 and result.assessment.decision == "stop"
@@ -1805,6 +1809,7 @@ class MethodTrail:
             best_metric=best_metric,
             incumbent_metric=self.project.incumbent_metric,
             incumbent_variant_id=self.project.incumbent_variant_id,
+            plateau_rounds=self.session.consecutive_non_improving,
             research_round=completed_rounds + 1,
             repair_step=0,
             recent_facts=facts,

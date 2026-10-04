@@ -737,7 +737,12 @@ class ExperimentPathGraph:
 
     @staticmethod
     def priority(
-        candidate: CandidatePath, remaining_seconds: int, weights: ValueWeights
+        candidate: CandidatePath,
+        remaining_seconds: int,
+        weights: ValueWeights,
+        *,
+        exploration_bonus: float = 0.0,
+        plateau_pressure: float = 0.0,
     ) -> float:
         value = (
             weights.alpha * candidate.expected_gain
@@ -747,7 +752,7 @@ class ExperimentPathGraph:
         denominator = (
             1.0 + weights.gamma * time_ratio + weights.delta * candidate.failure_risk
         )
-        return value / denominator
+        return value / denominator + weights.exploration * plateau_pressure * exploration_bonus
 
     def rank(
         self,
@@ -756,6 +761,7 @@ class ExperimentPathGraph:
         weights: ValueWeights,
         maximize_metric: bool = True,
         reserve_seconds: int = 0,
+        plateau_rounds: int = 0,
     ) -> list[tuple[CandidatePath, float]]:
         scored = []
         for candidate in candidates:
@@ -765,6 +771,7 @@ class ExperimentPathGraph:
                 remaining_seconds,
                 reserve_seconds=reserve_seconds,
                 maximize_metric=maximize_metric,
+                plateau_rounds=plateau_rounds,
             )
             adjusted = calibrated.model_copy(
                 update={
@@ -780,7 +787,16 @@ class ExperimentPathGraph:
                 }
             )
             priority = (
-                self.priority(adjusted, remaining_seconds, weights)
+                self.priority(
+                    adjusted,
+                    remaining_seconds,
+                    weights,
+                    exploration_bonus=(
+                        0.65 * float(signal.get("semantic_novelty", 0.0))
+                        + 0.35 * float(signal.get("uncertainty", 0.0))
+                    ),
+                    plateau_pressure=float(signal.get("plateau_pressure", 0.0)),
+                )
                 if signal["feasible"]
                 else float("-inf")
             )
@@ -793,30 +809,38 @@ class ExperimentPathGraph:
         remaining_seconds: int,
         reserve_seconds: int = 0,
         maximize_metric: bool = True,
+        plateau_rounds: int = 0,
     ) -> dict[str, Any]:
         """Explain how graph evidence changes a candidate's priority.
 
-        The graph contributes concrete coverage controls. A family with no
-        measured outcome receives an information bonus, while a family with
-        several non-improving outcomes receives a repeat penalty. A candidate
-        that only repeats the most recent changed factors is penalized after
-        two non-improving outcomes; an explicit composition remains eligible
-        as an information-seeking challenger. These controls never delete a
-        branch. Time feasibility is a hard condition, not a soft score.
+        The graph contributes concrete coverage controls. A semantically new
+        region receives an information/novelty bonus, while a region with
+        several non-improving outcomes receives a repeat penalty even when the
+        LLM gives each local variant a different family name. A candidate that
+        only repeats the most recent changed factors is penalized after two
+        non-improving outcomes; an explicit composition remains eligible as an
+        information-seeking challenger. These controls never delete a branch.
+        Time feasibility is a hard condition, not a soft score.
         """
 
         family = candidate.method.family
-        outcomes = [
-            data
-            for _, data in self.graph.nodes(data=True)
-            if data.get("node_type") == "outcome"
-            and data.get("method", {}).get("family", "unspecified") == family
-            and data.get("metric") is not None
-        ]
         all_outcomes = [
             data
             for _, data in self.graph.nodes(data=True)
             if data.get("node_type") == "outcome" and data.get("metric") is not None
+        ]
+        # Use semantic overlap for saturation. An LLM can legitimately give a
+        # new name to a branch, but a new name alone must not reset exploration
+        # pressure when the components and factors remain in the same region.
+        semantic_outcomes = [
+            data
+            for data in all_outcomes
+            if _method_region_similarity(candidate, data) >= 0.55
+        ]
+        outcomes = [
+            data
+            for data in all_outcomes
+            if data.get("method", {}).get("family", "unspecified") == family
         ]
         ordered_outcomes = sorted(
             all_outcomes,
@@ -825,9 +849,24 @@ class ExperimentPathGraph:
                 str(data.get("variant_id") or ""),
             ),
         )
-        unproductive = 0
-        historical_factors: set[str] = set()
+        family_unproductive = 0
         for data in outcomes:
+            parent_id = data.get("parent_variant_id")
+            parent_metric = (
+                self.graph.nodes[parent_id].get("metric")
+                if parent_id in self.graph.nodes
+                else None
+            )
+            if parent_metric is None:
+                continue
+            improvement = float(data["metric"]) - float(parent_metric)
+            if not maximize_metric:
+                improvement = -improvement
+            if improvement <= 0:
+                family_unproductive += 1
+        semantic_unproductive = 0
+        historical_factors: set[str] = set()
+        for data in semantic_outcomes:
             historical_factors.update(data.get("method", {}).get("changed_factors", []))
             parent_id = data.get("parent_variant_id")
             parent_metric = (
@@ -841,10 +880,18 @@ class ExperimentPathGraph:
             if not maximize_metric:
                 improvement = -improvement
             if improvement <= 0:
-                unproductive += 1
+                semantic_unproductive += 1
         candidate_factors = set(candidate.method.changed_factors)
         novel_factors = sorted(candidate_factors - historical_factors)
-        saturated = len(outcomes) >= 2 and unproductive >= 2
+        saturated = len(semantic_outcomes) >= 2 and semantic_unproductive >= 2
+        semantic_similarities = [
+            _method_region_similarity(candidate, data) for data in all_outcomes
+        ]
+        max_similarity = max(semantic_similarities, default=0.0)
+        semantic_novelty = max(0.0, 1.0 - max_similarity)
+        uncertainty = 1.0 / (1.0 + len(semantic_outcomes)) ** 0.5
+        plateau_pressure = min(1.0, max(0, int(plateau_rounds)) / 3.0)
+        semantic_saturated = saturated and semantic_novelty < 0.45
         initial_phase = not all_outcomes
         positive_families: set[str] = set()
         positive_factors: set[str] = set()
@@ -910,7 +957,13 @@ class ExperimentPathGraph:
             "reserve_seconds": reserve_seconds,
             "method_family": family,
             "family_outcome_count": len(outcomes),
-            "family_unproductive_count": unproductive,
+            "family_unproductive_count": family_unproductive,
+            "semantic_outcome_count": len(semantic_outcomes),
+            "semantic_unproductive_count": semantic_unproductive,
+            "semantic_novelty": semantic_novelty,
+            "uncertainty": uncertainty,
+            "plateau_rounds": max(0, int(plateau_rounds)),
+            "plateau_pressure": plateau_pressure,
             "novel_changed_factors": novel_factors,
             "exact_measured": exact_measured,
             "initial_phase": initial_phase,
@@ -921,29 +974,29 @@ class ExperimentPathGraph:
             "recent_non_improving": recent_non_improving,
             "family_status": (
                 "unmeasured"
-                if not outcomes
+                if not semantic_outcomes
                 else "saturated"
-                if saturated and not novel_factors
+                if semantic_saturated
                 else "active"
             ),
             "gain_multiplier": (
                 0.45
                 if factor_stuck and not is_composition
                 else 0.55
-                if saturated and not novel_factors
+                if semantic_saturated
                 else 1.0
             ),
             "information_multiplier": (
                 1.45
-                if initial_phase and not outcomes
+                if initial_phase and not semantic_outcomes
                 else 1.25
-                if not outcomes
+                if not semantic_outcomes
                 else 1.35
                 if is_composition and composition_gap
                 else 1.25
                 if factor_stuck
                 else 0.45
-                if saturated and not novel_factors
+                if semantic_saturated
                 else 1.0
             ),
         }
@@ -1282,6 +1335,20 @@ def _method_similarity(candidate: CandidatePath, outcome: dict[str, Any]) -> flo
         if str(value).strip()
     }
     component_overlap = candidate_components.intersection(historical_components)
+    candidate_factor_tokens = _semantic_tokens(candidate.method.changed_factors)
+    historical_factor_tokens = _semantic_tokens(historical_method.changed_factors)
+    factor_token_similarity = _token_jaccard(
+        candidate_factor_tokens, historical_factor_tokens
+    )
+    candidate_component_tokens = _semantic_tokens(
+        [f"{key} {value}" for key, value in candidate.method.components.items()]
+    )
+    historical_component_tokens = _semantic_tokens(
+        [f"{key} {value}" for key, value in historical_method.components.items()]
+    )
+    component_token_similarity = _token_jaccard(
+        candidate_component_tokens, historical_component_tokens
+    )
     same_family = (
         candidate.method.family != "unspecified"
         and candidate.method.family == historical_method.family
@@ -1297,13 +1364,92 @@ def _method_similarity(candidate: CandidatePath, outcome: dict[str, Any]) -> flo
         return 1.0
     if factor_overlap and compatible_relation:
         return 0.8
+    if factor_token_similarity >= 0.5 and compatible_relation:
+        return 0.75
     # Schema keys such as features/classifier are common to unrelated methods.
     # Transfer requires a shared ingredient, not merely the same field name.
     if component_overlap and compatible_relation:
         return 0.65
+    if component_token_similarity >= 0.45 and compatible_relation:
+        return 0.6
     if factor_overlap and _looks_like_composition(candidate) and _looks_like_method_metadata(outcome):
         return 0.55
     return 0.0
+
+
+def _method_region_similarity(candidate: CandidatePath, outcome: dict[str, Any]) -> float:
+    """Estimate whether two methods occupy the same search region.
+
+    This deliberately has a softer threshold than evidence transfer.  It is
+    used only to detect a plateau, so token overlap in declared factors or
+    component descriptions is enough to identify a renamed local variant;
+    it does not make the outcome a substitute for a measured comparison.
+    """
+
+    exact = _method_similarity(candidate, outcome)
+    if exact > 0.0:
+        return exact
+    historical_method = MethodDescriptor.model_validate(outcome.get("method") or {})
+    relation = str(candidate.relation)
+    historical_relation = str(outcome.get("relation") or "")
+    compatible_relation = relation == historical_relation or (
+        relation in {"combine", "deepen"}
+        and historical_relation in {"combine", "deepen"}
+    )
+    if not compatible_relation:
+        return 0.0
+    factor_similarity = _token_jaccard(
+        _semantic_tokens(candidate.method.changed_factors),
+        _semantic_tokens(historical_method.changed_factors),
+    )
+    component_similarity = _token_jaccard(
+        _semantic_tokens(
+            [f"{key} {value}" for key, value in candidate.method.components.items()]
+        ),
+        _semantic_tokens(
+            [f"{key} {value}" for key, value in historical_method.components.items()]
+        ),
+    )
+    if factor_similarity >= 0.2 or component_similarity >= 0.3:
+        return 0.55
+    return 0.0
+
+
+def _semantic_tokens(values: Iterable[Any]) -> set[str]:
+    # Field names and schema vocabulary should not make unrelated placeholder
+    # values such as ``factor-a`` and ``factor-b`` look semantically identical.
+    # Keep the token signal focused on the actual method ingredients.
+    stopwords = {
+        "ablate",
+        "classifier",
+        "component",
+        "data",
+        "feature",
+        "features",
+        "factor",
+        "factors",
+        "method",
+        "model",
+        "models",
+        "objective",
+        "representation",
+        "scope",
+        "target",
+        "variant",
+    }
+    tokens: set[str] = set()
+    for value in values:
+        tokens.update(
+            token
+            for token in re.split(r"[^a-z0-9]+", str(value).lower())
+            if token and len(token) > 1 and token not in stopwords
+        )
+    return tokens
+
+
+def _token_jaccard(left: set[str], right: set[str]) -> float:
+    union = left | right
+    return len(left & right) / len(union) if union else 0.0
 
 
 def candidate_coverage_gap(

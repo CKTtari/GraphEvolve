@@ -124,7 +124,8 @@ previous response and field-specific validation feedback, then retries using
 fresh source within the existing repair and time limits. Unexpected controller
 errors persist an interrupted session and refresh its dashboard. Numerical
 metric ties (relative and absolute tolerance `1e-12`) neither promote a new
-incumbent nor increment the adjacent-round deterioration counter.
+incumbent. They do count as plateau evidence for exploration pressure, because
+a tie still means the current best checkpoint was not exceeded.
 
 The Coding Agent has no authority to choose the research objective. Reflection and Choose define what should be tested; the Coding Agent decides how to express that test in executable code.
 
@@ -322,6 +323,25 @@ V_s = \alpha_s G_s + \beta_s I_s
 P_s = \frac{V_s}{1 + \gamma_s T_s + \delta_s R_s}
 \]
 
+During a plateau, the graph adds a bounded archive-diversity term:
+
+\[
+P'_s = P_s + \eta_s E_t\left(0.65N_s + 0.35U_s\right),
+\qquad E_t=\min(1, q_t/3)
+\]
+
+Here \(q_t\) is the number of completed rounds that failed to exceed the best
+checkpoint (a tie counts as plateau evidence), \(N_s=1-\max_j
+\operatorname{sim}(s,o_j)\) is semantic novelty against measured outcomes, and
+\(U_s=1/\sqrt{1+n_s}\) is uncertainty from the number \(n_s\) of semantically
+similar measured outcomes. The similarity uses declared changed factors and
+component values, while ignoring generic schema words and method-family names.
+The term is only a selection preference: feasibility, finalization reserve,
+failure safety, and the outer time budget remain hard constraints. This makes a
+new route more attractive when the current route has reached its expected
+yield, without discarding the best checkpoint or treating a lower score as a
+new incumbent.
+
 | Term | Meaning | Produced by |
 |---|---|---|
 | \(G_s\) | expected improvement over the selected version | LLM estimate grounded in historical evidence |
@@ -329,13 +349,18 @@ P_s = \frac{V_s}{1 + \gamma_s T_s + \delta_s R_s}
 | \(T_s\) | expected runtime divided by remaining runtime | program using historical runtime and adapter estimates |
 | \(R_s\) | execution risk | program using failure history, resource demand, and complexity |
 | \(P_s\) | final candidate priority | program calculation |
+| \(N_s\), \(U_s\) | semantic novelty and archive uncertainty | program calculation from the directed method graph |
+| \(E_t\) | bounded plateau exploration pressure | program calculation from completed rounds |
 
 The default calculation uses transparent unit weights. The LLM supplies the
 candidate's expected improvement and information value, while the program
 derives runtime and failure risk from the method graph and execution history.
-Task-specific stage coefficients are not hidden in the contract. Any change to
-the scoring rule is itself a versioned harness change and is recorded in the
-project history.
+Stage coefficients are recorded in every candidate-priority artifact. After
+two plateau rounds, Reflection and Choose are instructed to include an
+orthogonal or directed-backtrack branch and to keep at most one local
+calibration/aggregation control. A renamed family with the same components
+does not satisfy that requirement. Any change to the scoring rule is itself a
+versioned harness change and is recorded in the project history.
 
 The LLM sees program-sorted candidates. If it selects a lower-ranked path, it must record a concrete reason. Selected and deferred candidates both remain in the Decision Artifact.
 
@@ -543,16 +568,18 @@ same candidate; an abandoned repair returns to method selection. From Assess,
 the system can adopt and remember a result, keep a promising or incomplete
 branch for more evidence, expand the method graph, or stop.
 
-The multi-round runner allows up to 20 completed research rounds by default. It
-also stops after four consecutive completed rounds are strictly worse than the
-immediately preceding completed round, using the task's metric direction
-(decrease is deterioration for a maximize metric; increase is deterioration for
-a minimize metric). A tie resets this counter, as does any improvement. This
-is separate from path-priority penalties for methods with repeated
-non-improving evidence. An Agent `stop` decision or exhausted time budget can
-also stop the run. Technical repair attempts can repeat inside one round and
-do not consume the research-round count. The `dashboard` command writes an
-offline HTML view of
+The multi-round runner allows up to 20 completed research rounds by default.
+It does not stop merely because a few consecutive results are worse: the best
+valid checkpoint is retained, while every completed round that fails to exceed
+that checkpoint increments a persistent plateau counter. After two plateau
+rounds, the Question and Method Graph prompts enter exploration mode and the
+path ranker adds a bounded novelty/uncertainty bonus for semantically distant
+branches and directed backtracks. The bonus reaches its cap after three
+plateau rounds, while feasibility and the outer time budget remain hard
+constraints. An Agent `stop` decision, no executable candidate, or exhausted
+time budget can stop the run. Technical repair attempts can repeat inside one
+round and do not consume the research-round count. The `dashboard` command
+writes an offline HTML view of
 the method graph, experiment-memory graph, round filter, directed edge labels,
 node/edge change details, and trajectory events.
 
