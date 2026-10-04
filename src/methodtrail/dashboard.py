@@ -146,22 +146,65 @@ function label(n){ return String(n.title || n.conclusion || n.method_family || n
 function nodeIds(n){ return [n.card_id,n.id,n.node_id,n.variant_id].filter(x=>x!=null).map(String); }
 function nodeId(n){ return nodeIds(n)[0]; }
 function groupKey(n){ return String(n.method_family || n.method?.family || n.mutation_class || n.relation || 'other'); }
-const COLORS=['#b9d0ff','#bde8d3','#ffe2a8','#dccbff','#ffd0c2','#bde8ec','#f4c4df','#d9e9ad'];
-// Assign one stable color to each semantic group across both graphs.  The old
-// modulo-eight hash made unrelated groups share a color as soon as a project
-// contained more than eight families.
-const allGroups=[...new Set([...(method.nodes||[]),...(memory.nodes||[])].map(groupKey))].sort();
-const GROUP_COLORS=new Map(allGroups.map((key,index)=>{
-  if(index<COLORS.length)return [key,COLORS[index]];
-  const hue=Math.round((index*137.508)%360);
-  return [key,`hsl(${hue} 68% 80%)`];
-}));
-function groupColor(key){
-  const value=String(key);
-  if(GROUP_COLORS.has(value))return GROUP_COLORS.get(value);
-  let h=0; for(const ch of value) h=(h*31+ch.charCodeAt(0))%360;
-  return `hsl(${h} 68% 80%)`;
+// Node colors are recomputed for the currently visible round.  They encode a
+// cheap distance projection, not a stored graph relation: method metadata is
+// tokenized, pairwise weighted-Jaccard distances are measured, and distances
+// to three deterministic landmark nodes become R/G/B channels.  This keeps
+// colors stable within a view while allowing a newly completed round to update
+// the whole visible graph without changing any graph edge or node metadata.
+let activeNodeColors = new Map(), activeColorKey = '';
+function colorTokens(n){
+  const values=new Map();
+  const add=(value,weight=1)=>{
+    if(value==null)return;
+    const text=String(value).toLowerCase().replace(/[^\p{L}\p{N}]+/gu,' ');
+    text.split(/\s+/).filter(Boolean).forEach(token=>values.set(token,(values.get(token)||0)+weight));
+  };
+  add(n.method_family || n.method?.family,3);
+  add(n.mutation_class,2); add(n.relation,1);
+  const factors=n.changed_factors || n.method?.changed_factors || [];
+  (Array.isArray(factors)?factors:[factors]).forEach(value=>add(value,2));
+  const components=n.method_components || n.method?.components || {};
+  Object.entries(components||{}).forEach(([key,value])=>{add(key,1);add(value,2);});
+  return new Set(values);
 }
+function colorDistance(a,b){
+  const left=colorTokens(a), right=colorTokens(b);
+  let intersection=0, union=0;
+  new Set([...left.keys(),...right.keys()]).forEach(token=>{
+    const l=left.get(token)||0, r=right.get(token)||0;
+    intersection+=Math.min(l,r); union+=Math.max(l,r);
+  });
+  return union?1-intersection/union:1;
+}
+function normalizeColorChannel(values){
+  const low=Math.min(...values), high=Math.max(...values);
+  if(high-low<1e-9)return values.map(()=>0.72);
+  return values.map(value=>0.38+0.62*(value-low)/(high-low));
+}
+function computeNodeColors(nodes,key){
+  if(activeColorKey===key)return;
+  activeColorKey=key; activeNodeColors=new Map();
+  if(!nodes.length)return;
+  const ordered=[...nodes].sort((a,b)=>nodeId(a).localeCompare(nodeId(b)));
+  const anchorCount=Math.min(3,ordered.length), anchors=[ordered[0]];
+  while(anchors.length<anchorCount){
+    let best=null,bestDistance=-1;
+    ordered.forEach(candidate=>{
+      if(anchors.includes(candidate))return;
+      const distance=Math.min(...anchors.map(anchor=>colorDistance(candidate,anchor)));
+      if(distance>bestDistance || (Math.abs(distance-bestDistance)<1e-9 && nodeId(candidate)<nodeId(best))){best=candidate;bestDistance=distance;}
+    });
+    if(best)anchors.push(best);else break;
+  }
+  const channels=nodes.map(node=>anchors.map(anchor=>1-colorDistance(node,anchor)));
+  const normalized=[0,1,2].map(channel=>normalizeColorChannel(channels.map(row=>row[channel] ?? 0.72)));
+  nodes.forEach((node,index)=>{
+    const rgb=normalized.map(channel=>Math.round(255*channel[index]));
+    activeNodeColors.set(nodeId(node),`rgb(${rgb[0]} ${rgb[1]} ${rgb[2]})`);
+  });
+}
+function nodeColor(n){return activeNodeColors.get(nodeId(n)) || 'rgb(210 220 235)';}
 function restorePositions(key, positions){
   try{
     const saved=JSON.parse(localStorage.getItem(positionStoragePrefix+'|'+key) || '{}');
@@ -436,14 +479,15 @@ function draw(){
   const g = visibleGraph(), nodes=g.nodes, edges=g.edges;
   $('viewName').textContent = view === 'memory' ? '经验图' : '方法图';
   $('relationHint').textContent = view === 'memory'
-    ? '经验图：箭头为前序证据 → 后续实验；follows=父版本，informed by=决策依据，same family/shared factor=相关证据'
-    : '方法图：箭头只表示方法关系；轮次和修改逻辑在节点详情中查看';
+    ? '经验图：箭头为前序证据 → 后续实验；follows=父版本，informed by=决策依据，same family/shared factor=相关证据；颜色按当前轮相似度投影'
+    : '方法图：箭头只表示方法关系；轮次和修改逻辑在节点详情中查看；颜色按当前轮相似度投影';
   const graphKey=view+'|'+round;
   let positions=positionStore.get(graphKey);
   if(!positions){ positions=restorePositions(graphKey,layout(nodes, edges)); positionStore.set(graphKey,positions); }
   activeGraphKey=graphKey; activePositions=positions;
   if(!transformStore.has(graphKey))transformStore.set(graphKey,restoreTransform(graphKey,positions));
   activeTransform=transformStore.get(graphKey);
+  computeNodeColors(nodes,graphKey);
   const lookup=new Map(); nodes.forEach(n=>nodeIds(n).forEach(id=>lookup.set(id,n)));
   const defs=document.createElementNS('http://www.w3.org/2000/svg','defs');
   defs.innerHTML='<marker id="arrow" markerWidth="10" markerHeight="10" refX="8" refY="5" orient="auto" markerUnits="userSpaceOnUse"><path d="M0,0 L10,5 L0,10 Z" fill="#7b8798"/></marker>';
@@ -473,7 +517,7 @@ function draw(){
     const p=positions.get(nodeId(n)); if(!p)return;
     const group=document.createElementNS('http://www.w3.org/2000/svg','g');
     const c=document.createElementNS('http://www.w3.org/2000/svg','circle');
-    c.setAttribute('cx',p.x);c.setAttribute('cy',p.y);c.setAttribute('r',34);c.setAttribute('fill',groupColor(groupKey(n)));
+    c.setAttribute('cx',p.x);c.setAttribute('cy',p.y);c.setAttribute('r',34);c.setAttribute('fill',nodeColor(n));
     c.setAttribute('class','node '+(n.node_type||'')+(n.origin?' origin':'')+(n.status==='failed'?' failed':'')+(selectedNodeId===nodeId(n)?' selected':''));
     group.onpointerdown=e=>startDrag(e,n);
     group.onclick=e=>{e.stopPropagation();if(!suppressNextClick)showDetails(n);};
@@ -490,7 +534,7 @@ function draw(){
   const events=(DATA.events||[]).filter(e=>['iteration_finished','technical_attempt','research_stop'].includes(e.kind));
   const shown=round==='all'?events:events.filter(e=>String(e.payload?.iteration||'')===String(round));
   const eventHtml=shown.slice(-6).map(e=>{const p=e.payload||{}; const bad=e.kind==='technical_attempt'; return `<div class="event ${bad?'bad':'good'}"><b>${e.kind}</b> · 第${p.iteration||'?'}轮 · ${p.decision||p.reason||''}<br>指标：${p.metric==null?'未测得':p.metric} ${p.next_question?'<br>下一问题：'+p.next_question:''}</div>`;}).join('');
-  const groups=[...new Set(nodes.map(groupKey))]; const legend=groups.map(g=>`<span style="color:${groupColor(g)}">● ${g}</span>`).join(' · ');
+  const groups=[...new Set(nodes.map(groupKey))]; const legend=groups.map(g=>`<span>${g}</span>`).join(' · ');
   $('summary').innerHTML = `<div class="card"><b>节点</b><br>${nodes.length}</div><div class="card"><b>有向关系</b><br>${edges.length}</div><div class="card"><b>方法族</b><br>${groups.length}<br>${legend}</div>${eventHtml}`;
   renderScoreChart();
   renderCandidatePanel();
