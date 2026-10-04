@@ -147,7 +147,21 @@ function nodeIds(n){ return [n.card_id,n.id,n.node_id,n.variant_id].filter(x=>x!
 function nodeId(n){ return nodeIds(n)[0]; }
 function groupKey(n){ return String(n.method_family || n.method?.family || n.mutation_class || n.relation || 'other'); }
 const COLORS=['#b9d0ff','#bde8d3','#ffe2a8','#dccbff','#ffd0c2','#bde8ec','#f4c4df','#d9e9ad'];
-function groupColor(key){ let h=0; for(const ch of key) h=(h*31+ch.charCodeAt(0))%COLORS.length; return COLORS[h]; }
+// Assign one stable color to each semantic group across both graphs.  The old
+// modulo-eight hash made unrelated groups share a color as soon as a project
+// contained more than eight families.
+const allGroups=[...new Set([...(method.nodes||[]),...(memory.nodes||[])].map(groupKey))].sort();
+const GROUP_COLORS=new Map(allGroups.map((key,index)=>{
+  if(index<COLORS.length)return [key,COLORS[index]];
+  const hue=Math.round((index*137.508)%360);
+  return [key,`hsl(${hue} 68% 80%)`];
+}));
+function groupColor(key){
+  const value=String(key);
+  if(GROUP_COLORS.has(value))return GROUP_COLORS.get(value);
+  let h=0; for(const ch of value) h=(h*31+ch.charCodeAt(0))%360;
+  return `hsl(${h} 68% 80%)`;
+}
 function restorePositions(key, positions){
   try{
     const saved=JSON.parse(localStorage.getItem(positionStoragePrefix+'|'+key) || '{}');
@@ -314,7 +328,7 @@ function layout(nodes, edges){
       const push=12000/(d*d), fx=push*dx/d, fy=push*dy/d; force.get(nodeId(nodes[i])).x+=fx; force.get(nodeId(nodes[i])).y+=fy; force.get(nodeId(nodes[j])).x-=fx; force.get(nodeId(nodes[j])).y-=fy;
     }
     edges.forEach(e=>{ const sa=lookup.get(String(e.source)), sb=lookup.get(String(e.target)); if(!sa||!sb||sa===sb)return; const a=points.get(sa),b=points.get(sb); let dx=b.x-a.x,dy=b.y-a.y,d=Math.max(1,Math.hypot(dx,dy)); const pull=(d-220)*0.009,fx=pull*dx/d,fy=pull*dy/d; force.get(sa).x+=fx;force.get(sa).y+=fy;force.get(sb).x-=fx;force.get(sb).y-=fy; });
-    nodes.forEach(n=>{ const id=nodeId(n), p=points.get(id), c=centers.get(groupKey(n)), f=force.get(id); f.x+=(c.x-p.x)*0.012; f.y+=(c.y-p.y)*0.012; p.x=Math.max(90,Math.min(WORLD_WIDTH-90,p.x+f.x*0.55)); p.y=Math.max(90,Math.min(WORLD_HEIGHT-90,p.y+f.y*0.55)); });
+    nodes.forEach(n=>{ const id=nodeId(n), p=points.get(id), c=centers.get(groupKey(n)), f=force.get(id); f.x+=(c.x-p.x)*0.035; f.y+=(c.y-p.y)*0.035; p.x=Math.max(90,Math.min(WORLD_WIDTH-90,p.x+f.x*0.55)); p.y=Math.max(90,Math.min(WORLD_HEIGHT-90,p.y+f.y*0.55)); });
   }
   // A deterministic overlap resolver guarantees a readable initial state even
   // when the force layout converges with two nodes in the same small pocket.
