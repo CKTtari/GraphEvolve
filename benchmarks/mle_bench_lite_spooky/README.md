@@ -47,15 +47,21 @@ conda run -n nlphw python run_graph_evolve.py `
   --max-repair-steps 100
 ```
 
-The default research budget is five hours (`18000` seconds). The task contract
-still limits one candidate execution to `300` seconds; the five-hour budget is
-for the complete serial research session, including planning, code changes,
-repairs and evaluation.
+The default research budget is five hours (`18000` seconds). The five-hour
+budget is for the complete serial research session, including planning, code
+changes, repairs and evaluation. `timeout_seconds` remains a legacy adapter
+field; the current executor checks long-running processes at intervals and only
+enforces an explicit `execution_hard_timeout_seconds` when the task contract
+sets one.
 
 The run records each code change, private score, runtime, failure and graph
-decision under `runs/graph_evolve_state/`. The process stops earlier after four
-completed research rounds without an improvement over the incumbent. Technical
-repairs do not count as research rounds.
+decision under `runs/graph_evolve_state/`. The best checkpoint is retained
+throughout the run. Rounds that do not exceed it increase plateau exploration
+pressure; after two plateau rounds the prompts and method-graph ranker favor
+semantically new or directed-backtrack branches. The process stops on the
+outer time budget, the iteration limit, an explicit Agent stop decision, or the
+absence of an executable candidate. Technical repairs do not count as research
+rounds.
 
 ## First measured run
 
