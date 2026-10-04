@@ -54,7 +54,10 @@ button { cursor:pointer; }
 .toolbar { display:flex; gap:8px; align-items:center; flex-wrap:wrap; margin-bottom:8px; }
 .toolbar span { color:var(--muted); }
 .project-name { color:var(--muted); font-size:12px; max-width:420px; overflow-wrap:anywhere; }
-#canvas { width:100%; height:650px; background:#fff; border-radius:6px; border:1px solid #d9dee7; touch-action:none; }
+#canvas { width:100%; height:min(76vh,820px); min-height:650px; background:#fff; border-radius:6px; border:1px solid #d9dee7; touch-action:none; cursor:grab; }
+#canvas:active { cursor:grabbing; }
+.zoom-controls { display:inline-flex; gap:4px; margin-left:auto; }
+.zoom-controls button { min-width:32px; padding:5px 8px; }
 .hint { color:var(--muted); margin:5px 0 0; }
 #details { overflow:auto; max-height:570px; color:var(--text); }
 #details h3 { margin:0 0 8px; font-size:16px; }
@@ -123,13 +126,17 @@ svg text { font-family:inherit; }
 </head>
 <body>
 <header><h1>__BRAND__</h1><span class="project-name">__PROJECT__</span><label>轮次 <select id="iteration"></select></label><button id="methodBtn">方法图</button><button id="memoryBtn">经验图</button><button id="allBtn">全部</button><span id="status"></span></header>
-<div class="layout"><main class="panel"><div class="toolbar"><span id="viewName">方法图</span><span>左键点击选择；按住左键拖动节点。箭头表示方向。</span><span id="relationHint"></span></div><svg id="canvas" viewBox="0 0 1000 570" preserveAspectRatio="xMidYMid meet"></svg><section id="scoreChart" class="chart-panel"></section><section id="candidatePanel" class="chart-panel"></section><div id="summary" class="cards"></div></main><aside class="panel"><h2>节点或边详情</h2><div id="details">选择一个节点或有向边</div></aside></div>
+<div class="layout"><main class="panel"><div class="toolbar"><span id="viewName">方法图</span><span>左键点击选择；按住左键拖动节点；空白处拖动画布；滚轮缩放。</span><span id="relationHint"></span><span class="zoom-controls"><button id="zoomOut" title="缩小">−</button><button id="zoomIn" title="放大">＋</button><button id="resetView">重置视图</button></span></div><svg id="canvas" viewBox="0 0 1200 700" preserveAspectRatio="xMidYMid meet"></svg><section id="scoreChart" class="chart-panel"></section><section id="candidatePanel" class="chart-panel"></section><div id="summary" class="cards"></div></main><aside class="panel"><h2>节点或边详情</h2><div id="details">选择一个节点或有向边</div></aside></div>
 <script>
 const DATA = __DATA__;
 const $ = id => document.getElementById(id);
 let view = 'method', round = 'all';
 const positionStore = new Map();
-let activePositions = null, activeGraphKey = '', dragging = null, suppressNextClick = false;
+const transformStore = new Map();
+const VIEW_WIDTH = 1200, VIEW_HEIGHT = 700;
+const WORLD_WIDTH = 1800, WORLD_HEIGHT = 1100;
+let activePositions = null, activeGraphKey = '', activeTransform = null;
+let dragging = null, panDragging = null, suppressNextClick = false;
 let selectedNodeId = null, selectedEdgeKey = null;
 const positionStoragePrefix = `methodtrail-pos|${String(DATA.project?.project_id || '')}|${String(DATA.session?.session_id || '')}`;
 const method = DATA.method_graph || {nodes:[], edges:[]};
@@ -150,6 +157,28 @@ function restorePositions(key, positions){
 function persistPositions(){
   if(!activePositions || !activeGraphKey)return;
   try{ localStorage.setItem(positionStoragePrefix+'|'+activeGraphKey, JSON.stringify(Object.fromEntries(activePositions))); }catch(_){ }
+}
+function restoreTransform(key, positions){
+  try{
+    const raw=JSON.parse(localStorage.getItem(positionStoragePrefix+'|transform|'+key) || 'null');
+    if(raw && Number.isFinite(raw.x) && Number.isFinite(raw.y) && Number.isFinite(raw.scale) && raw.scale>0){
+      return {x:raw.x,y:raw.y,scale:raw.scale};
+    }
+  }catch(_){ }
+  if(!positions || !positions.size)return {x:0,y:0,scale:0.8};
+  let minX=Infinity,minY=Infinity,maxX=-Infinity,maxY=-Infinity;
+  positions.forEach(p=>{minX=Math.min(minX,p.x);minY=Math.min(minY,p.y);maxX=Math.max(maxX,p.x);maxY=Math.max(maxY,p.y);});
+  const width=Math.max(1,maxX-minX+150), height=Math.max(1,maxY-minY+150);
+  const scale=Math.max(0.42,Math.min(1,(VIEW_WIDTH-70)/width,(VIEW_HEIGHT-70)/height));
+  return {x:(VIEW_WIDTH-(minX+maxX)*scale)/2,y:(VIEW_HEIGHT-(minY+maxY)*scale)/2,scale};
+}
+function persistTransform(){
+  if(!activeGraphKey || !activeTransform)return;
+  try{ localStorage.setItem(positionStoragePrefix+'|transform|'+activeGraphKey, JSON.stringify(activeTransform)); }catch(_){ }
+}
+function applyTransform(){
+  const layer=$('graphLayer');
+  if(layer && activeTransform)layer.setAttribute('transform',`translate(${activeTransform.x} ${activeTransform.y}) scale(${activeTransform.scale})`);
 }
 function edgeLabel(e){
   const base=String(e.relation||e.edge_type||e.label||'relation').replaceAll('_',' ');
@@ -274,17 +303,33 @@ function renderCandidatePanel(){
 function layout(nodes, edges){
   const positions=new Map(), points=new Map(), groups=[...new Set(nodes.map(groupKey))];
   const cols=Math.max(1,Math.ceil(Math.sqrt(groups.length))), rows=Math.max(1,Math.ceil(groups.length/cols));
-  const centers=new Map(); groups.forEach((g,i)=>{ const col=i%cols, row=Math.floor(i/cols); centers.set(g,{x:180+(col+0.5)*(640/cols),y:110+(row+0.5)*(350/rows)}); });
-  nodes.forEach((n,i)=>{ const c=centers.get(groupKey(n)); const angle=(i*2.399)-Math.PI/2; const radius=35+(i%4)*16; points.set(nodeId(n),{x:c.x+Math.cos(angle)*radius,y:c.y+Math.sin(angle)*radius}); });
+  const centers=new Map(); groups.forEach((g,i)=>{ const col=i%cols, row=Math.floor(i/cols); centers.set(g,{x:220+(col+0.5)*((WORLD_WIDTH-440)/cols),y:170+(row+0.5)*((WORLD_HEIGHT-340)/rows)}); });
+  nodes.forEach((n,i)=>{ const c=centers.get(groupKey(n)); const angle=(i*2.399)-Math.PI/2; const radius=82+(i%5)*28; points.set(nodeId(n),{x:c.x+Math.cos(angle)*radius,y:c.y+Math.sin(angle)*radius}); });
   const lookup=new Map(); nodes.forEach(n=>nodeIds(n).forEach(id=>lookup.set(id,nodeId(n))));
-  for(let step=0;step<100;step++){
+  for(let step=0;step<140;step++){
     const force=new Map(nodes.map(n=>[nodeId(n),{x:0,y:0}]));
     for(let i=0;i<nodes.length;i++) for(let j=i+1;j<nodes.length;j++){
       const a=points.get(nodeId(nodes[i])), b=points.get(nodeId(nodes[j])); let dx=a.x-b.x, dy=a.y-b.y, d=Math.max(18,Math.hypot(dx,dy));
-      const push=1700/(d*d), fx=push*dx/d, fy=push*dy/d; force.get(nodeId(nodes[i])).x+=fx; force.get(nodeId(nodes[i])).y+=fy; force.get(nodeId(nodes[j])).x-=fx; force.get(nodeId(nodes[j])).y-=fy;
+      const push=12000/(d*d), fx=push*dx/d, fy=push*dy/d; force.get(nodeId(nodes[i])).x+=fx; force.get(nodeId(nodes[i])).y+=fy; force.get(nodeId(nodes[j])).x-=fx; force.get(nodeId(nodes[j])).y-=fy;
     }
-    edges.forEach(e=>{ const sa=lookup.get(String(e.source)), sb=lookup.get(String(e.target)); if(!sa||!sb||sa===sb)return; const a=points.get(sa),b=points.get(sb); let dx=b.x-a.x,dy=b.y-a.y,d=Math.max(1,Math.hypot(dx,dy)); const pull=(d-145)*0.012,fx=pull*dx/d,fy=pull*dy/d; force.get(sa).x+=fx;force.get(sa).y+=fy;force.get(sb).x-=fx;force.get(sb).y-=fy; });
-    nodes.forEach(n=>{ const id=nodeId(n), p=points.get(id), c=centers.get(groupKey(n)), f=force.get(id); f.x+=(c.x-p.x)*0.018; f.y+=(c.y-p.y)*0.018; p.x=Math.max(45,Math.min(955,p.x+f.x*0.45)); p.y=Math.max(45,Math.min(525,p.y+f.y*0.45)); });
+    edges.forEach(e=>{ const sa=lookup.get(String(e.source)), sb=lookup.get(String(e.target)); if(!sa||!sb||sa===sb)return; const a=points.get(sa),b=points.get(sb); let dx=b.x-a.x,dy=b.y-a.y,d=Math.max(1,Math.hypot(dx,dy)); const pull=(d-220)*0.009,fx=pull*dx/d,fy=pull*dy/d; force.get(sa).x+=fx;force.get(sa).y+=fy;force.get(sb).x-=fx;force.get(sb).y-=fy; });
+    nodes.forEach(n=>{ const id=nodeId(n), p=points.get(id), c=centers.get(groupKey(n)), f=force.get(id); f.x+=(c.x-p.x)*0.012; f.y+=(c.y-p.y)*0.012; p.x=Math.max(90,Math.min(WORLD_WIDTH-90,p.x+f.x*0.55)); p.y=Math.max(90,Math.min(WORLD_HEIGHT-90,p.y+f.y*0.55)); });
+  }
+  // A deterministic overlap resolver guarantees a readable initial state even
+  // when the force layout converges with two nodes in the same small pocket.
+  const minimum=104;
+  for(let pass=0;pass<90;pass++){
+    let moved=false;
+    for(let i=0;i<nodes.length;i++) for(let j=i+1;j<nodes.length;j++){
+      const a=points.get(nodeId(nodes[i])), b=points.get(nodeId(nodes[j]));
+      let dx=a.x-b.x,dy=a.y-b.y,d=Math.hypot(dx,dy);
+      if(d>=minimum)continue;
+      if(d<0.001){ const angle=((i*37+j*17)%360)*Math.PI/180; dx=Math.cos(angle);dy=Math.sin(angle);d=1; }
+      const shift=(minimum-d)/2, sx=dx/d*shift, sy=dy/d*shift;
+      a.x=Math.max(90,Math.min(WORLD_WIDTH-90,a.x+sx)); a.y=Math.max(90,Math.min(WORLD_HEIGHT-90,a.y+sy));
+      b.x=Math.max(90,Math.min(WORLD_WIDTH-90,b.x-sx)); b.y=Math.max(90,Math.min(WORLD_HEIGHT-90,b.y-sy)); moved=true;
+    }
+    if(!moved)break;
   }
   nodes.forEach(n=>nodeIds(n).forEach(id=>positions.set(id,points.get(nodeId(n)))));
   return positions;
@@ -294,24 +339,43 @@ function svgPoint(event){
   point.x=event.clientX; point.y=event.clientY;
   return point.matrixTransform(svg.getScreenCTM().inverse());
 }
+function worldPoint(event){
+  const point=svgPoint(event), transform=activeTransform||{x:0,y:0,scale:1};
+  return {x:(point.x-transform.x)/transform.scale,y:(point.y-transform.y)/transform.scale};
+}
 function startDrag(event, node){
   if(event.button!=null && event.button!==0)return;
   event.stopPropagation();
-  const ids=nodeIds(node), id=nodeId(node), point=svgPoint(event), old=activePositions.get(id);
+  const ids=nodeIds(node), id=nodeId(node), point=worldPoint(event), old=activePositions.get(id);
   dragging={ids, id, node, startX:point.x, startY:point.y, offsetX:old.x-point.x, offsetY:old.y-point.y, pointerId:event.pointerId, captured:false};
   showDetails(node, false);
 }
 function moveDrag(event){
   if(!dragging || !activePositions)return;
-  const point=svgPoint(event), p={x:point.x+dragging.offsetX,y:point.y+dragging.offsetY};
+  const point=worldPoint(event), p={x:point.x+dragging.offsetX,y:point.y+dragging.offsetY};
   if(!dragging.captured && Math.hypot(point.x-dragging.startX,point.y-dragging.startY)<=8)return;
   if(!dragging.captured){
     dragging.captured=true;
     try{$('canvas').setPointerCapture(dragging.pointerId);}catch(_){ }
   }
-  p.x=Math.max(30,Math.min(970,p.x)); p.y=Math.max(30,Math.min(620,p.y));
+  p.x=Math.max(90,Math.min(WORLD_WIDTH-90,p.x)); p.y=Math.max(90,Math.min(WORLD_HEIGHT-90,p.y));
   const old=activePositions.get(dragging.id); if(Math.hypot(p.x-old.x,p.y-old.y)<1)return;
   dragging.ids.forEach(id=>activePositions.set(id,p)); persistPositions(); draw(true);
+}
+function startPan(event){
+  if(event.button!=null && event.button!==0)return;
+  if(event.target!==$('canvas'))return;
+  event.preventDefault();
+  const point=svgPoint(event);
+  panDragging={startX:point.x,startY:point.y,x:activeTransform?.x||0,y:activeTransform?.y||0,pointerId:event.pointerId,moved:false,captured:false};
+  try{$('canvas').setPointerCapture(event.pointerId);panDragging.captured=true;}catch(_){ }
+}
+function movePan(event){
+  if(!panDragging || !activeTransform)return;
+  const point=svgPoint(event), dx=point.x-panDragging.startX, dy=point.y-panDragging.startY;
+  if(Math.hypot(dx,dy)>3)panDragging.moved=true;
+  activeTransform.x=panDragging.x+dx; activeTransform.y=panDragging.y+dy;
+  applyTransform(); persistTransform();
 }
 function endDrag(event){
   if(!dragging)return;
@@ -321,6 +385,36 @@ function endDrag(event){
   suppressNextClick=true;
   if(!finished.captured && finished.node)showDetails(finished.node);
   setTimeout(()=>{suppressNextClick=false;},0);
+}
+function endPan(event){
+  if(!panDragging)return;
+  if(panDragging.captured){try{$('canvas').releasePointerCapture(panDragging.pointerId);}catch(_){ }}
+  const moved=panDragging.moved;
+  panDragging=null;
+  if(moved)suppressNextClick=true;
+  if(moved)setTimeout(()=>{suppressNextClick=false;},0);
+}
+function zoomAt(event,factor){
+  if(!activeTransform)return;
+  const before=svgPoint(event), oldScale=activeTransform.scale;
+  const next=Math.max(0.35,Math.min(3.5,oldScale*factor));
+  if(Math.abs(next-oldScale)<0.0001)return;
+  const worldX=(before.x-activeTransform.x)/oldScale, worldY=(before.y-activeTransform.y)/oldScale;
+  activeTransform.scale=next;
+  activeTransform.x=before.x-worldX*next; activeTransform.y=before.y-worldY*next;
+  applyTransform(); persistTransform();
+}
+function resetView(){
+  // Explicit reset ignores the saved view and fits all current nodes.
+  activeTransform=activePositions?.size?(()=>{
+    let minX=Infinity,minY=Infinity,maxX=-Infinity,maxY=-Infinity;
+    activePositions.forEach(p=>{minX=Math.min(minX,p.x);minY=Math.min(minY,p.y);maxX=Math.max(maxX,p.x);maxY=Math.max(maxY,p.y);});
+    const width=Math.max(1,maxX-minX+150),height=Math.max(1,maxY-minY+150);
+    const scale=Math.max(0.42,Math.min(1,(VIEW_WIDTH-70)/width,(VIEW_HEIGHT-70)/height));
+    return {x:(VIEW_WIDTH-(minX+maxX)*scale)/2,y:(VIEW_HEIGHT-(minY+maxY)*scale)/2,scale};
+  })():{x:0,y:0,scale:0.8};
+  transformStore.set(activeGraphKey,activeTransform);
+  persistTransform(); applyTransform();
 }
 function draw(){
   const svg = $('canvas'); while(svg.firstChild) svg.removeChild(svg.firstChild);
@@ -333,10 +427,15 @@ function draw(){
   let positions=positionStore.get(graphKey);
   if(!positions){ positions=restorePositions(graphKey,layout(nodes, edges)); positionStore.set(graphKey,positions); }
   activeGraphKey=graphKey; activePositions=positions;
+  if(!transformStore.has(graphKey))transformStore.set(graphKey,restoreTransform(graphKey,positions));
+  activeTransform=transformStore.get(graphKey);
   const lookup=new Map(); nodes.forEach(n=>nodeIds(n).forEach(id=>lookup.set(id,n)));
   const defs=document.createElementNS('http://www.w3.org/2000/svg','defs');
   defs.innerHTML='<marker id="arrow" markerWidth="10" markerHeight="10" refX="8" refY="5" orient="auto" markerUnits="userSpaceOnUse"><path d="M0,0 L10,5 L0,10 Z" fill="#7b8798"/></marker>';
   svg.appendChild(defs);
+  const layer=document.createElementNS('http://www.w3.org/2000/svg','g');
+  layer.setAttribute('id','graphLayer');
+  svg.appendChild(layer);
   edges.forEach((e,index)=>{
     const a=positions.get(String(e.source)),b=positions.get(String(e.target)); if(!a||!b)return;
     const dx=b.x-a.x, dy=b.y-a.y, distance=Math.max(1,Math.hypot(dx,dy)), radius=36;
@@ -353,7 +452,7 @@ function draw(){
     const text=document.createElementNS('http://www.w3.org/2000/svg','text');
     const offset=((index%3)-1)*11;
     text.setAttribute('x',(x1+x2)/2+offset); text.setAttribute('y',(y1+y2)/2-5+offset); text.setAttribute('class','edge-label'); text.textContent=edgeLabel(e);
-    group.appendChild(hit); group.appendChild(line); group.appendChild(text); svg.appendChild(group);
+    group.appendChild(hit); group.appendChild(line); group.appendChild(text); layer.appendChild(group);
   });
   nodes.forEach(n=>{
     const p=positions.get(nodeId(n)); if(!p)return;
@@ -367,11 +466,12 @@ function draw(){
     const title=document.createElementNS('http://www.w3.org/2000/svg','title');
     title.textContent=`${n.iteration==null?'':`第${n.iteration}轮 · `}${String(n.title||n.conclusion||n.method_family||'')}`;
     group.appendChild(title);
-    const t=document.createElementNS('http://www.w3.org/2000/svg','text');t.setAttribute('x',p.x);t.setAttribute('y',p.y+4);t.setAttribute('class','node-text');t.textContent=label(n);group.appendChild(t);svg.appendChild(group);
+    const t=document.createElementNS('http://www.w3.org/2000/svg','text');t.setAttribute('x',p.x);t.setAttribute('y',p.y+4);t.setAttribute('class','node-text');t.textContent=label(n);group.appendChild(t);layer.appendChild(group);
     if(n.iteration!=null){
       const r=document.createElementNS('http://www.w3.org/2000/svg','text');r.setAttribute('x',p.x);r.setAttribute('y',p.y+20);r.setAttribute('class','node-round');r.textContent=`${n.origin?'起点 · ':''}第${n.iteration}轮`;group.appendChild(r);
     }
   });
+  applyTransform();
   const events=(DATA.events||[]).filter(e=>['iteration_finished','technical_attempt','research_stop'].includes(e.kind));
   const shown=round==='all'?events:events.filter(e=>String(e.payload?.iteration||'')===String(round));
   const eventHtml=shown.slice(-6).map(e=>{const p=e.payload||{}; const bad=e.kind==='technical_attempt'; return `<div class="event ${bad?'bad':'good'}"><b>${e.kind}</b> · 第${p.iteration||'?'}轮 · ${p.decision||p.reason||''}<br>指标：${p.metric==null?'未测得':p.metric} ${p.next_question?'<br>下一问题：'+p.next_question:''}</div>`;}).join('');
@@ -459,12 +559,19 @@ function init(){
   const iterations=new Set(['all']); [...(method.nodes||[]),...(memory.nodes||[])].forEach(n=>{if(n.iteration!=null)iterations.add(String(n.iteration));});
   $('iteration').innerHTML=[...iterations].map(x=>`<option value="${x}">${x==='all'?'全部':('截至第 '+x+' 轮')}</option>`).join('');
   $('iteration').onchange=e=>{round=e.target.value;selectedNodeId=null;selectedEdgeKey=null;draw();};
-  $('canvas').addEventListener('pointermove',moveDrag); $('canvas').addEventListener('pointerup',endDrag); $('canvas').addEventListener('pointercancel',endDrag);
+  $('canvas').addEventListener('pointerdown',startPan);
+  $('canvas').addEventListener('pointermove',event=>{if(dragging)moveDrag(event);else movePan(event);});
+  $('canvas').addEventListener('pointerup',event=>{endDrag(event);endPan(event);});
+  $('canvas').addEventListener('pointercancel',event=>{endDrag(event);endPan(event);});
+  $('canvas').addEventListener('wheel',event=>{event.preventDefault();zoomAt(event,event.deltaY<0?1.12:1/1.12);},{passive:false});
   $('canvas').addEventListener('contextmenu',event=>event.preventDefault());
   $('canvas').addEventListener('click',event=>{if(event.target===$('canvas')){selectedNodeId=null;selectedEdgeKey=null;renderDetails('图','未选择','点击节点或有向边查看详情');draw();}});
   $('methodBtn').onclick=()=>{view='method';selectedNodeId=null;selectedEdgeKey=null;draw();};
   $('memoryBtn').onclick=()=>{view='memory';selectedNodeId=null;selectedEdgeKey=null;draw();};
   $('allBtn').onclick=()=>{round='all';$('iteration').value='all';selectedNodeId=null;selectedEdgeKey=null;draw();};
+  $('zoomIn').onclick=()=>{const rect=$('canvas').getBoundingClientRect();zoomAt({clientX:rect.left+rect.width/2,clientY:rect.top+rect.height/2},1.25);};
+  $('zoomOut').onclick=()=>{const rect=$('canvas').getBoundingClientRect();zoomAt({clientX:rect.left+rect.width/2,clientY:rect.top+rect.height/2},0.8);};
+  $('resetView').onclick=resetView;
   const p=DATA.project||{}; const s=DATA.session||{}; $('status').textContent=`${s.status||''} · 当前版本 ${p.incumbent_variant_id||'baseline'}`; draw();
 }
 init();
