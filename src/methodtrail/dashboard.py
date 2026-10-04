@@ -95,7 +95,7 @@ const DATA = __DATA__;
 const $ = id => document.getElementById(id);
 let view = 'method', round = 'all';
 const positionStore = new Map();
-let activePositions = null, activeGraphKey = '', dragging = null, lastDragMoved = false;
+let activePositions = null, activeGraphKey = '', dragging = null, suppressNextClick = false;
 let selectedNodeId = null, selectedEdgeKey = null;
 const positionStoragePrefix = `methodtrail-pos|${String(DATA.project?.project_id || '')}|${String(DATA.session?.session_id || '')}`;
 const method = DATA.method_graph || {nodes:[], edges:[]};
@@ -170,26 +170,28 @@ function startDrag(event, node){
   event.stopPropagation();
   const ids=nodeIds(node), id=nodeId(node), point=svgPoint(event), old=activePositions.get(id);
   dragging={ids, id, node, startX:point.x, startY:point.y, offsetX:old.x-point.x, offsetY:old.y-point.y, pointerId:event.pointerId, captured:false};
-  lastDragMoved=false;
+  showDetails(node, false);
 }
 function moveDrag(event){
   if(!dragging || !activePositions)return;
   const point=svgPoint(event), p={x:point.x+dragging.offsetX,y:point.y+dragging.offsetY};
-  if(!dragging.captured && Math.hypot(point.x-dragging.startX,point.y-dragging.startY)<=4)return;
+  if(!dragging.captured && Math.hypot(point.x-dragging.startX,point.y-dragging.startY)<=8)return;
   if(!dragging.captured){
     dragging.captured=true;
     try{$('canvas').setPointerCapture(dragging.pointerId);}catch(_){ }
   }
   p.x=Math.max(30,Math.min(970,p.x)); p.y=Math.max(30,Math.min(620,p.y));
   const old=activePositions.get(dragging.id); if(Math.hypot(p.x-old.x,p.y-old.y)<1)return;
-  dragging.ids.forEach(id=>activePositions.set(id,p)); persistPositions(); lastDragMoved=true; draw(true);
+  dragging.ids.forEach(id=>activePositions.set(id,p)); persistPositions(); draw(true);
 }
 function endDrag(event){
   if(!dragging)return;
   const finished=dragging;
   if(finished.captured){try{$('canvas').releasePointerCapture(finished.pointerId);}catch(_){ }}
   dragging=null;
-  if(lastDragMoved)setTimeout(()=>{lastDragMoved=false;},0);
+  suppressNextClick=true;
+  if(!finished.captured && finished.node)showDetails(finished.node);
+  setTimeout(()=>{suppressNextClick=false;},0);
 }
 function draw(){
   const svg = $('canvas'); while(svg.firstChild) svg.removeChild(svg.firstChild);
@@ -231,7 +233,7 @@ function draw(){
     c.setAttribute('cx',p.x);c.setAttribute('cy',p.y);c.setAttribute('r',34);c.setAttribute('fill',groupColor(groupKey(n)));
     c.setAttribute('class','node '+(n.node_type||'')+(n.origin?' origin':'')+(n.status==='failed'?' failed':'')+(selectedNodeId===nodeId(n)?' selected':''));
     group.onpointerdown=e=>startDrag(e,n);
-    group.onclick=e=>{e.stopPropagation();if(!lastDragMoved)showDetails(n);};
+    group.onclick=e=>{e.stopPropagation();if(!suppressNextClick)showDetails(n);};
     group.appendChild(c);
     const title=document.createElementNS('http://www.w3.org/2000/svg','title');
     title.textContent=`${n.iteration==null?'':`第${n.iteration}轮 · `}${String(n.title||n.conclusion||n.method_family||'')}`;
@@ -297,7 +299,7 @@ function renderDetails(kind, title, payload){
     const pre=document.createElement('pre'); pre.textContent=JSON.stringify(payload,null,2); raw.appendChild(pre); box.appendChild(raw);
   }
 }
-function showDetails(n){
+function showDetails(n, redraw=true){
   selectedNodeId=nodeId(n); selectedEdgeKey=null;
   renderDetails('节点', String(n.title || n.conclusion || n.method_family || label(n)), {
     id:nodeId(n), title:n.title, node_type:n.node_type, origin:n.origin, origin_reason:n.origin_reason, iteration:n.iteration,
@@ -310,7 +312,7 @@ function showDetails(n){
     conclusion:n.conclusion, evidence_summary:n.evidence_summary,
     applicable_conditions:n.applicable_conditions,
   });
-  draw();
+  if(redraw)draw();
 }
 function showEdgeDetails(e){
   selectedEdgeKey=edgeKey(e); selectedNodeId=null;
