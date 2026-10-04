@@ -792,8 +792,8 @@ class ExperimentPathGraph:
                     remaining_seconds,
                     weights,
                     exploration_bonus=(
-                        0.65 * float(signal.get("semantic_novelty", 0.0))
-                        + 0.35 * float(signal.get("uncertainty", 0.0))
+                        0.45 * float(signal.get("semantic_novelty", 0.0))
+                        + 0.15 * float(signal.get("uncertainty", 0.0))
                     ),
                     plateau_pressure=float(signal.get("plateau_pressure", 0.0)),
                 )
@@ -813,14 +813,13 @@ class ExperimentPathGraph:
     ) -> dict[str, Any]:
         """Explain how graph evidence changes a candidate's priority.
 
-        The graph contributes concrete coverage controls. A semantically new
-        region receives an information/novelty bonus, while a region with
-        several non-improving outcomes receives a repeat penalty even when the
-        LLM gives each local variant a different family name. A candidate that
-        only repeats the most recent changed factors is penalized after two
-        non-improving outcomes; an explicit composition remains eligible as an
-        information-seeking challenger. These controls never delete a branch.
-        Time feasibility is a hard condition, not a soft score.
+        The graph contributes a light evidence signal. A semantically new
+        region can receive an information bonus, while a region with repeated
+        non-improving outcomes becomes less attractive. A prior positive result
+        keeps a nearby region promising even when later variants plateau; the
+        ranker should inform the LLM's choice, not force a novelty route or
+        delete a branch. Time feasibility is a hard condition, not a soft
+        score.
         """
 
         family = candidate.method.family
@@ -865,6 +864,7 @@ class ExperimentPathGraph:
             if improvement <= 0:
                 family_unproductive += 1
         semantic_unproductive = 0
+        semantic_positive = 0
         historical_factors: set[str] = set()
         for data in semantic_outcomes:
             historical_factors.update(data.get("method", {}).get("changed_factors", []))
@@ -881,17 +881,22 @@ class ExperimentPathGraph:
                 improvement = -improvement
             if improvement <= 0:
                 semantic_unproductive += 1
+            else:
+                semantic_positive += 1
         candidate_factors = set(candidate.method.changed_factors)
         novel_factors = sorted(candidate_factors - historical_factors)
-        saturated = len(semantic_outcomes) >= 2 and semantic_unproductive >= 2
+        promising_region = semantic_positive > 0
+        saturated = len(semantic_outcomes) >= 3 and semantic_unproductive >= 3
         semantic_similarities = [
             _method_region_similarity(candidate, data) for data in all_outcomes
         ]
         max_similarity = max(semantic_similarities, default=0.0)
         semantic_novelty = max(0.0, 1.0 - max_similarity)
         uncertainty = 1.0 / (1.0 + len(semantic_outcomes)) ** 0.5
-        plateau_pressure = min(1.0, max(0, int(plateau_rounds)) / 3.0)
-        semantic_saturated = saturated and semantic_novelty < 0.45
+        plateau_pressure = min(0.65, max(0, int(plateau_rounds)) / 6.0)
+        semantic_saturated = (
+            saturated and not promising_region and semantic_novelty < 0.45
+        )
         initial_phase = not all_outcomes
         positive_families: set[str] = set()
         positive_factors: set[str] = set()
@@ -936,8 +941,11 @@ class ExperimentPathGraph:
                 if improvement <= 0:
                     recent_non_improving += 1
                     recent_factor_counts.update(method.get("changed_factors", []))
-        factor_stuck = bool(candidate_factors) and recent_non_improving >= 2 and all(
-            recent_factor_counts[factor] >= 2 for factor in candidate_factors
+        factor_stuck = (
+            bool(candidate_factors)
+            and not promising_region
+            and recent_non_improving >= 2
+            and all(recent_factor_counts[factor] >= 2 for factor in candidate_factors)
         )
         composition_gap = is_composition and not any(
             _looks_like_method_metadata(data) for data in all_outcomes
@@ -960,6 +968,8 @@ class ExperimentPathGraph:
             "family_unproductive_count": family_unproductive,
             "semantic_outcome_count": len(semantic_outcomes),
             "semantic_unproductive_count": semantic_unproductive,
+            "semantic_positive_count": semantic_positive,
+            "promising_region": promising_region,
             "semantic_novelty": semantic_novelty,
             "uncertainty": uncertainty,
             "plateau_rounds": max(0, int(plateau_rounds)),
@@ -980,9 +990,9 @@ class ExperimentPathGraph:
                 else "active"
             ),
             "gain_multiplier": (
-                0.45
+                0.70
                 if factor_stuck and not is_composition
-                else 0.55
+                else 0.75
                 if semantic_saturated
                 else 1.0
             ),
@@ -993,9 +1003,9 @@ class ExperimentPathGraph:
                 if not semantic_outcomes
                 else 1.35
                 if is_composition and composition_gap
-                else 1.25
+                else 1.10
                 if factor_stuck
-                else 0.45
+                else 0.75
                 if semantic_saturated
                 else 1.0
             ),
@@ -1515,11 +1525,12 @@ def candidate_coverage_gap(
         return None
     return (
         "The last measured candidates contain at least two non-improving outcomes "
-        "and the current batch repeats their method families and changed factors. "
-        "Add one executable orthogonal direction with a new family or changed factor, while "
-        "retaining at most one controlled local refinement. A repeatability check "
-        "is valid when it changes the fold, seed, convergence check, or validation "
-        "protocol and names the unresolved cause."
+        "and the current batch is close to that recent region. Reconsider the batch "
+        "using the evidence: a local continuation, measured backtrack, orthogonal "
+        "direction, or another different direction may be useful, but do not add a "
+        "nominally new method only to satisfy "
+        "this warning. A repeatability check is valid when it changes the fold, seed, "
+        "convergence check, or validation protocol and names the unresolved cause."
     )
 
 

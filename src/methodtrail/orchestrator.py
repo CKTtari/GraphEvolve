@@ -49,6 +49,55 @@ from .workspace import WorkspaceManager
 
 logger = logging.getLogger(__name__)
 MIN_COMPARISON_CANDIDATES = 4
+MAX_AGENT_CANDIDATES = 18
+
+
+def _selection_view(
+    ranked_candidates: list[dict[str, Any]],
+    limit: int = MAX_AGENT_CANDIDATES,
+) -> list[dict[str, Any]]:
+    """Give the selector a compact, decision-useful view of the frontier.
+
+    The graph keeps every pending proposal, but sending an ever-growing list
+    to the LLM makes it harder to reason about the live question.  Preserve a
+    high-priority core and a few evidence-based alternatives so the LLM can
+    still override the program rank when a lower-ranked branch is promising.
+    This is a context bound, not a forced search policy.
+    """
+
+    if len(ranked_candidates) <= limit:
+        return ranked_candidates
+    selected: dict[int, dict[str, Any]] = {}
+
+    def add(row: dict[str, Any]) -> None:
+        index = row.get("index")
+        if isinstance(index, int):
+            selected.setdefault(index, row)
+
+    for row in ranked_candidates[: max(8, limit // 2)]:
+        add(row)
+    perspectives = [
+        lambda row: float(row.get("graph_signal", {}).get("semantic_novelty", 0.0)),
+        lambda row: float(row.get("candidate", {}).get("expected_gain", 0.0)),
+        lambda row: float(row.get("candidate", {}).get("information_gain", 0.0)),
+        lambda row: 1.0
+        if row.get("candidate", {}).get("parent_variant_id")
+        else 0.0,
+        lambda row: 1.0
+        if row.get("candidate", {}).get("relation") in {"deepen", "recover"}
+        else 0.0,
+    ]
+    for score in perspectives:
+        for row in sorted(ranked_candidates, key=score, reverse=True):
+            if row.get("graph_signal", {}).get("feasible"):
+                add(row)
+                break
+    for row in ranked_candidates:
+        if len(selected) >= limit:
+            break
+        add(row)
+    chosen = set(selected)
+    return [row for row in ranked_candidates if row.get("index") in chosen]
 
 
 @dataclass
@@ -223,16 +272,12 @@ class MethodTrail:
                 limit=3, maximize_metric=contract.maximize_metric
             ),
         )
-        if state.plateau_rounds >= 2:
-            plateau_gap = (
-                "The best checkpoint has not been exceeded for at least two completed research rounds. "
-                "The candidate batch must include at least one executable branch that is semantically distant "
-                "from the recent plateau or explicitly backtracks to an older measured ancestor; a renamed "
-                "calibration or aggregation variant is not sufficient novelty. Keep one local control only "
-                "when it is needed to interpret the orthogonal branch."
-            )
-            coverage_gap = f"{coverage_gap}\n{plateau_gap}" if coverage_gap else plateau_gap
-        if coverage_gap:
+        # A narrow initial batch merits one revision.  Once a project has a
+        # measured frontier, plateau feedback is advisory: forcing a second
+        # proposal batch on every plateau both costs context time and turns a
+        # useful signal into a rigid exploration rule.  The LLM can decide
+        # whether to extend, revisit, or replace the current line.
+        if coverage_gap and state.plateau_rounds < 2:
             # One bounded revision pass prevents a narrow initial proposal set
             # from becoming the entire search space.  It keeps the same
             # hypothesis and does not invent a task-specific predictor.
@@ -322,6 +367,7 @@ class MethodTrail:
             raise BudgetExhausted(
                 "no candidate fits the remaining time after the finalization reserve"
             )
+        selection_view = _selection_view(feasible_ranked)
         priority_id = self.store.put(
             "candidate_priorities",
             {
@@ -330,6 +376,8 @@ class MethodTrail:
                 "comparison_floor": MIN_COMPARISON_CANDIDATES,
                 "comparison_count": len(ranked_payload),
                 "comparison_floor_met": len(ranked_payload) >= MIN_COMPARISON_CANDIDATES,
+                "agent_selection_count": len(selection_view),
+                "agent_selection_limit": MAX_AGENT_CANDIDATES,
                 "plateau_rounds": state.plateau_rounds,
                 "exploration_pressure": min(1.0, state.plateau_rounds / 3.0),
                 "weights": weights.model_dump(mode="json"),
@@ -337,7 +385,7 @@ class MethodTrail:
             },
             [proposal_id],
         )
-        selection = self.choose.select(contract, state, hypothesis, feasible_ranked)
+        selection = self.choose.select(contract, state, hypothesis, selection_view)
         selected_row = next(
             (row for row in feasible_ranked if row["index"] == selection.selected_index),
             None,
@@ -1834,7 +1882,7 @@ class MethodTrail:
                 query,
                 seed_variant_ids=[parent_variant_id] if parent_variant_id else None,
             ),
-            method_pool=self.graph.method_pool(limit=100),
+            method_pool=self.graph.method_pool(limit=60),
             memory_graph_context=self.experiment_memory.graph_profile(contract.task_id),
         )
 

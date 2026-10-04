@@ -179,10 +179,10 @@ class ChangeRequestArtifact(BaseModel):
 class CandidateProposalArtifact(BaseModel):
     """A dynamically sized batch of executable method nodes.
 
-    The LLM should provide at least four distinct executable directions when
-    the task and graph support that breadth. Existing frontier candidates are
-    merged with new proposals before ranking, so this is a comparison floor,
-    not a requirement to invent padded or duplicate methods.
+    The LLM should return only the small set of directions that helps answer
+    the current question. Existing frontier candidates are merged with new
+    proposals before ranking, so a round does not need to invent padded or
+    duplicate methods.
     """
 
     candidates: list[ChangeRequestArtifact] = Field(min_length=1)
