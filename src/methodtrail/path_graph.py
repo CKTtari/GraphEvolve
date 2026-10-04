@@ -661,12 +661,36 @@ class ExperimentPathGraph:
         return [dict(data) for _, data in values]
 
     def export_payload(self) -> dict[str, Any]:
-        """Return nodes and all typed edges for offline monitoring/export."""
+        """Return method relationships for offline monitoring/export.
+
+        ``__project_root__`` is an internal anchor used by older selection
+        logic.  It is not a method and its synthetic edges are not research
+        relationships, so the dashboard must never render them.
+        """
 
         data = nx.node_link_data(self.graph, edges="edges")
+        hidden = {
+            str(node.get("id", node.get("node_id", node.get("variant_id", ""))))
+            for node in data.get("nodes", [])
+            if node.get("node_type") == "root"
+            or node.get("id") == ROOT_NODE_ID
+            or node.get("node_id") == ROOT_NODE_ID
+            or node.get("variant_id") == ROOT_NODE_ID
+        }
         return {
-            "nodes": data.get("nodes", []),
-            "edges": data.get("edges", []),
+            "directed": True,
+            "nodes": [
+                node
+                for node in data.get("nodes", [])
+                if str(node.get("id", node.get("node_id", node.get("variant_id", "")))) not in hidden
+            ],
+            "edges": [
+                edge
+                for edge in data.get("edges", [])
+                if str(edge.get("source")) not in hidden
+                and str(edge.get("target")) not in hidden
+                and edge.get("edge_type") != "root"
+            ],
         }
 
     def best_outcome_id(self, maximize_metric: bool = True) -> str | None:

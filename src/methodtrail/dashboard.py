@@ -44,7 +44,10 @@ button { cursor:pointer; }
 .toolbar span { color:var(--muted); }
 #canvas { width:100%; height:650px; background:#fff; border-radius:6px; border:1px solid #d9dee7; touch-action:none; }
 .hint { color:var(--muted); margin:5px 0 0; }
-#details { white-space:pre-wrap; overflow:auto; max-height:570px; color:var(--text); }
+#details { overflow:auto; max-height:570px; color:var(--text); }
+#details h3 { margin:0 0 8px; font-size:16px; }
+#details .detail-kind { color:var(--muted); font-size:12px; margin-bottom:8px; }
+#details pre { margin:0; white-space:pre-wrap; overflow-wrap:anywhere; font:12px/1.55 ui-monospace,SFMono-Regular,Consolas,monospace; }
 .metric { font-size:20px; color:var(--good); margin:4px 0 10px; }
 .cards { display:grid; grid-template-columns:repeat(auto-fit,minmax(180px,1fr)); gap:8px; margin-top:10px; }
 .card { border:1px solid var(--line); border-radius:6px; padding:9px; background:#fff; }
@@ -53,11 +56,14 @@ button { cursor:pointer; }
 .event.good { border-left-color:var(--good); }
 .event.bad { border-left-color:var(--bad); }
 svg text { font-family:inherit; }
-.edge { stroke:#9aa5b5; stroke-width:1.5; opacity:.88; marker-end:url(#arrow); cursor:pointer; }
+.edge { stroke:#9aa5b5; stroke-width:1.6; opacity:.88; marker-end:url(#arrow); pointer-events:none; }
+.edge-hit { stroke:transparent; stroke-width:14; fill:none; cursor:pointer; pointer-events:stroke; }
+.edge-group.selected .edge { stroke:#b7791f; stroke-width:3; opacity:1; }
+.edge-group.selected .edge-label { fill:#8b5e13; font-weight:700; }
 .edge.lineage, .edge.follows { stroke:#3d9a70; }
 .edge.evidence, .edge.same_family { stroke:#8b6fc4; stroke-dasharray:6 4; }
 .edge.shared_factor, .edge.related { stroke:#c58a2b; stroke-dasharray:3 4; }
-.edge-label { fill:#4b5565; font-size:10px; pointer-events:none; paint-order:stroke; stroke:#fff; stroke-width:4px; stroke-linejoin:round; }
+.edge-label { fill:#4b5565; font-size:9px; pointer-events:none; paint-order:stroke; stroke:#fff; stroke-width:3px; stroke-linejoin:round; text-anchor:middle; }
 .edge.related { stroke:#8b6fc4; stroke-dasharray:5 4; }
 .edge.candidate { stroke:#356ae6; stroke-dasharray:3 4; }
 .edge.execution { stroke:#3d9a70; }
@@ -80,6 +86,7 @@ const $ = id => document.getElementById(id);
 let view = 'method', round = 'all';
 const positionStore = new Map();
 let activePositions = null, activeGraphKey = '', dragging = null, lastDragMoved = false;
+let selectedNodeId = null, selectedEdgeKey = null;
 const positionStoragePrefix = `methodtrail-pos|${String(DATA.project?.project_id || '')}|${String(DATA.session?.session_id || '')}`;
 const method = DATA.method_graph || {nodes:[], edges:[]};
 const memory = DATA.memory_graph || {nodes:[], edges:[]};
@@ -100,7 +107,10 @@ function persistPositions(){
   if(!activePositions || !activeGraphKey)return;
   try{ localStorage.setItem(positionStoragePrefix+'|'+activeGraphKey, JSON.stringify(Object.fromEntries(activePositions))); }catch(_){ }
 }
-function edgeLabel(e){ const c=e.target_change||{}; const base=String(e.label||e.relation||e.edge_type||'relation').replaceAll('_',' '); const round=c.iteration==null?'':` · 第${c.iteration}轮`; const title=c.title?` · ${String(c.title).slice(0,18)}`:''; return base+round+title; }
+function edgeLabel(e){
+  return String(e.relation||e.edge_type||e.label||'relation').replaceAll('_',' ');
+}
+function edgeKey(e){ return `${String(e.source)}→${String(e.target)}|${String(e.edge_type||e.relation||'')}`; }
 function findNode(id){ const wanted=String(id); return (view==='memory'?memory:method).nodes.find(n=>nodeIds(n).includes(wanted)); }
 function changeOf(n){
   if(!n) return {};
@@ -112,8 +122,9 @@ function changeOf(n){
 }
 function visibleGraph(){
   const g = view === 'memory' ? memory : method;
-  let nodes = (g.nodes || []).filter(n => round === 'all' || String(n.iteration || '') === String(round));
-  if (round !== 'all' && !nodes.length) nodes = g.nodes || [];
+  let nodes = (g.nodes || []).filter(n => n.node_type !== 'root' && n.variant_id !== '__project_root__' && n.id !== '__project_root__' && n.node_id !== '__project_root__');
+  nodes = nodes.filter(n => round === 'all' || String(n.iteration || '') === String(round));
+  if (round !== 'all' && !nodes.length) nodes = (g.nodes || []).filter(n => n.node_type !== 'root' && n.variant_id !== '__project_root__' && n.id !== '__project_root__' && n.node_id !== '__project_root__');
   const ids = new Set(nodes.flatMap(nodeIds));
   let edges = (g.edges || []).filter(e => ids.has(String(e.source)) && ids.has(String(e.target)));
   return {nodes, edges};
@@ -144,7 +155,7 @@ function svgPoint(event){
 function startDrag(event, node){
   event.preventDefault(); event.stopPropagation();
   const ids=nodeIds(node), id=nodeId(node), point=svgPoint(event), old=activePositions.get(id);
-  dragging={ids, id, offsetX:old.x-point.x, offsetY:old.y-point.y, pointerId:event.pointerId};
+  dragging={ids, id, node, offsetX:old.x-point.x, offsetY:old.y-point.y, pointerId:event.pointerId};
   lastDragMoved=false; $('canvas').setPointerCapture(event.pointerId);
 }
 function moveDrag(event){
@@ -156,8 +167,10 @@ function moveDrag(event){
 }
 function endDrag(event){
   if(!dragging)return;
-  try{$('canvas').releasePointerCapture(dragging.pointerId);}catch(_){ }
+  const finished=dragging;
+  try{$('canvas').releasePointerCapture(finished.pointerId);}catch(_){ }
   dragging=null;
+  if(!lastDragMoved && finished.node) showDetails(finished.node);
   if(lastDragMoved)setTimeout(()=>{lastDragMoved=false;},0);
 }
 function draw(){
@@ -169,23 +182,83 @@ function draw(){
   if(!positions){ positions=restorePositions(graphKey,layout(nodes, edges)); positionStore.set(graphKey,positions); }
   activeGraphKey=graphKey; activePositions=positions;
   const lookup=new Map(); nodes.forEach(n=>nodeIds(n).forEach(id=>lookup.set(id,n)));
-  const defs=document.createElementNS('http://www.w3.org/2000/svg','defs'); defs.innerHTML='<marker id="arrow" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto"><path d="M0,0 L8,4 L0,8 Z" fill="#9aa5b5"/></marker>'; svg.appendChild(defs);
-  edges.forEach(e=>{ const a=positions.get(String(e.source)),b=positions.get(String(e.target)); if(!a||!b)return; const line=document.createElementNS('http://www.w3.org/2000/svg','line'); line.setAttribute('x1',a.x);line.setAttribute('y1',a.y);line.setAttribute('x2',b.x);line.setAttribute('y2',b.y);line.setAttribute('class','edge '+(e.edge_type||e.relation||'')); line.onclick=()=>showEdgeDetails(e); const title=document.createElementNS('http://www.w3.org/2000/svg','title'); title.textContent=edgeLabel(e)+' · '+(e.reason||''); line.appendChild(title); svg.appendChild(line); const text=document.createElementNS('http://www.w3.org/2000/svg','text'); text.setAttribute('x',(a.x+b.x)/2); text.setAttribute('y',(a.y+b.y)/2-5); text.setAttribute('class','edge-label'); text.textContent=edgeLabel(e); text.onclick=()=>showEdgeDetails(e); svg.appendChild(text); });
-  nodes.forEach(n=>{ const p=positions.get(nodeId(n)); if(!p)return; const group=document.createElementNS('http://www.w3.org/2000/svg','g'); const c=document.createElementNS('http://www.w3.org/2000/svg','circle'); c.setAttribute('cx',p.x);c.setAttribute('cy',p.y);c.setAttribute('r',34);c.setAttribute('fill',groupColor(groupKey(n)));c.setAttribute('class','node '+(n.node_type||'')+(n.status==='failed'?' failed':'')); group.onpointerdown=e=>startDrag(e,n); group.onclick=()=>{if(!lastDragMoved)showDetails(n);}; group.appendChild(c); const t=document.createElementNS('http://www.w3.org/2000/svg','text');t.setAttribute('x',p.x);t.setAttribute('y',p.y+4);t.setAttribute('class','node-text');t.textContent=label(n);group.appendChild(t);svg.appendChild(group); });
+  const defs=document.createElementNS('http://www.w3.org/2000/svg','defs');
+  defs.innerHTML='<marker id="arrow" markerWidth="10" markerHeight="10" refX="8" refY="5" orient="auto" markerUnits="userSpaceOnUse"><path d="M0,0 L10,5 L0,10 Z" fill="#7b8798"/></marker>';
+  svg.appendChild(defs);
+  edges.forEach((e,index)=>{
+    const a=positions.get(String(e.source)),b=positions.get(String(e.target)); if(!a||!b)return;
+    const dx=b.x-a.x, dy=b.y-a.y, distance=Math.max(1,Math.hypot(dx,dy)), radius=36;
+    const x1=a.x+dx*radius/distance, y1=a.y+dy*radius/distance;
+    const x2=b.x-dx*radius/distance, y2=b.y-dy*radius/distance;
+    const group=document.createElementNS('http://www.w3.org/2000/svg','g');
+    group.setAttribute('class','edge-group'+(selectedEdgeKey===edgeKey(e)?' selected':''));
+    const hit=document.createElementNS('http://www.w3.org/2000/svg','line');
+    hit.setAttribute('x1',x1); hit.setAttribute('y1',y1); hit.setAttribute('x2',x2); hit.setAttribute('y2',y2); hit.setAttribute('class','edge-hit');
+    hit.onclick=event=>{event.stopPropagation();showEdgeDetails(e);};
+    const line=document.createElementNS('http://www.w3.org/2000/svg','line');
+    line.setAttribute('x1',x1); line.setAttribute('y1',y1); line.setAttribute('x2',x2); line.setAttribute('y2',y2); line.setAttribute('class','edge '+(e.edge_type||e.relation||''));
+    const title=document.createElementNS('http://www.w3.org/2000/svg','title'); title.textContent=edgeLabel(e)+' · '+(e.reason||''); line.appendChild(title);
+    const text=document.createElementNS('http://www.w3.org/2000/svg','text');
+    const offset=((index%3)-1)*11;
+    text.setAttribute('x',(x1+x2)/2+offset); text.setAttribute('y',(y1+y2)/2-5+offset); text.setAttribute('class','edge-label'); text.textContent=edgeLabel(e);
+    group.appendChild(hit); group.appendChild(line); group.appendChild(text); svg.appendChild(group);
+  });
+  nodes.forEach(n=>{
+    const p=positions.get(nodeId(n)); if(!p)return;
+    const group=document.createElementNS('http://www.w3.org/2000/svg','g');
+    const c=document.createElementNS('http://www.w3.org/2000/svg','circle');
+    c.setAttribute('cx',p.x);c.setAttribute('cy',p.y);c.setAttribute('r',34);c.setAttribute('fill',groupColor(groupKey(n)));
+    c.setAttribute('class','node '+(n.node_type||'')+(n.status==='failed'?' failed':'')+(selectedNodeId===nodeId(n)?' selected':''));
+    group.onpointerdown=e=>startDrag(e,n);
+    group.onclick=e=>{e.stopPropagation();if(!lastDragMoved)showDetails(n);};
+    group.appendChild(c);
+    const t=document.createElementNS('http://www.w3.org/2000/svg','text');t.setAttribute('x',p.x);t.setAttribute('y',p.y+4);t.setAttribute('class','node-text');t.textContent=label(n);group.appendChild(t);svg.appendChild(group);
+  });
   const events=(DATA.events||[]).filter(e=>['iteration_finished','technical_attempt','research_stop'].includes(e.kind));
   const shown=round==='all'?events:events.filter(e=>String(e.payload?.iteration||'')===String(round));
   const eventHtml=shown.slice(-6).map(e=>{const p=e.payload||{}; const bad=e.kind==='technical_attempt'; return `<div class="event ${bad?'bad':'good'}"><b>${e.kind}</b> · 第${p.iteration||'?'}轮 · ${p.decision||p.reason||''}<br>指标：${p.metric==null?'未测得':p.metric} ${p.next_question?'<br>下一问题：'+p.next_question:''}</div>`;}).join('');
   const groups=[...new Set(nodes.map(groupKey))]; const legend=groups.map(g=>`<span style="color:${groupColor(g)}">● ${g}</span>`).join(' · ');
   $('summary').innerHTML = `<div class="card"><b>节点</b><br>${nodes.length}</div><div class="card"><b>有向关系</b><br>${edges.length}</div><div class="card"><b>方法族</b><br>${groups.length}<br>${legend}</div>${eventHtml}`;
 }
-function showDetails(n){ $('details').textContent=JSON.stringify(n,null,2); }
-function showEdgeDetails(e){ const source=findNode(e.source), target=findNode(e.target); $('details').textContent=JSON.stringify({relation:e.relation,edge_type:e.edge_type,reason:e.reason,shared_factors:e.shared_factors||[],source:{id:e.source,title:source&&label(source)},target:{id:e.target,title:target&&label(target),change:changeOf(target)},target_change:e.target_change||null},null,2); }
+function renderDetails(kind, title, payload){
+  const box=$('details'); box.replaceChildren();
+  const h=document.createElement('h3'); h.textContent=title; box.appendChild(h);
+  const k=document.createElement('div'); k.className='detail-kind'; k.textContent=kind; box.appendChild(k);
+  const pre=document.createElement('pre'); pre.textContent=JSON.stringify(payload,null,2); box.appendChild(pre);
+}
+function showDetails(n){
+  selectedNodeId=nodeId(n); selectedEdgeKey=null;
+  renderDetails('节点', label(n), {
+    id:nodeId(n), node_type:n.node_type, iteration:n.iteration,
+    method_family:n.method_family || n.method?.family, relation:n.relation,
+    status:n.status, metric:n.metric, question:n.question,
+    change_logic:n.change_logic || n.change?.change_logic,
+    changed_factors:n.changed_factors || n.method?.changed_factors,
+    method_components:n.method_components || n.method?.components,
+    conclusion:n.conclusion, evidence_summary:n.evidence_summary,
+    applicable_conditions:n.applicable_conditions,
+  });
+  draw();
+}
+function showEdgeDetails(e){
+  selectedEdgeKey=edgeKey(e); selectedNodeId=null;
+  const source=findNode(e.source), target=findNode(e.target);
+  renderDetails('有向边', `${edgeLabel(e)} · ${label(target||{})}`, {
+    source:{id:e.source,title:source&&label(source)}, target:{id:e.target,title:target&&label(target)},
+    relation:e.relation, edge_type:e.edge_type, direction:'source → target', reason:e.reason,
+    shared_factors:e.shared_factors||[], target_change:e.target_change||changeOf(target),
+  });
+  draw();
+}
 function init(){
   const iterations=new Set(['all']); [...(method.nodes||[]),...(memory.nodes||[])].forEach(n=>{if(n.iteration!=null)iterations.add(String(n.iteration));});
   $('iteration').innerHTML=[...iterations].map(x=>`<option value="${x}">${x==='all'?'全部':('第 '+x+' 轮')}</option>`).join('');
-  $('iteration').onchange=e=>{round=e.target.value;draw();};
+  $('iteration').onchange=e=>{round=e.target.value;selectedNodeId=null;selectedEdgeKey=null;draw();};
   $('canvas').addEventListener('pointermove',moveDrag); $('canvas').addEventListener('pointerup',endDrag); $('canvas').addEventListener('pointercancel',endDrag);
-  $('methodBtn').onclick=()=>{view='method';draw();}; $('memoryBtn').onclick=()=>{view='memory';draw();}; $('allBtn').onclick=()=>{round='all';$('iteration').value='all';draw();};
+  $('canvas').addEventListener('click',event=>{if(event.target===$('canvas')){selectedNodeId=null;selectedEdgeKey=null;renderDetails('图','未选择','点击节点或有向边查看详情');draw();}});
+  $('methodBtn').onclick=()=>{view='method';selectedNodeId=null;selectedEdgeKey=null;draw();};
+  $('memoryBtn').onclick=()=>{view='memory';selectedNodeId=null;selectedEdgeKey=null;draw();};
+  $('allBtn').onclick=()=>{round='all';$('iteration').value='all';selectedNodeId=null;selectedEdgeKey=null;draw();};
   const p=DATA.project||{}; const s=DATA.session||{}; $('status').textContent=`${s.status||''} · 当前版本 ${p.incumbent_variant_id||'baseline'}`; draw();
 }
 init();

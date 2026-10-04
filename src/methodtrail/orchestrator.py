@@ -1857,6 +1857,7 @@ class MethodTrail:
             "events": self.projects.events(project, selected_session, limit=100000),
             "method_graph": graph.export_payload(),
             "memory_graph": {
+                "directed": True,
                 "nodes": list(memory.graph.nodes.values()),
                 "edges": list(memory.graph.edges),
             },
