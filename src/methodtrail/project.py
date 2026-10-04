@@ -50,6 +50,8 @@ class SessionRecord:
     # Number of completed research rounds that did not beat the best
     # checkpoint. It raises exploration pressure; it is not a stop counter.
     consecutive_non_improving: int = 0
+    # Direction-aware diagnostic for the trajectory; retained for dashboards
+    # and reports, but it no longer stops research by itself.
     consecutive_deteriorating: int = 0
     last_metric: float | None = None
 
