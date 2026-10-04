@@ -138,7 +138,8 @@ const WORLD_WIDTH = 1800, WORLD_HEIGHT = 1100;
 let activePositions = null, activeGraphKey = '', activeTransform = null;
 let dragging = null, panDragging = null, suppressNextClick = false;
 let selectedNodeId = null, selectedEdgeKey = null;
-const positionStoragePrefix = `methodtrail-pos|${String(DATA.project?.project_id || '')}|${String(DATA.session?.session_id || '')}`;
+// Layout v2 deliberately ignores coordinates saved by the old fixed 1000×570 canvas.
+const positionStoragePrefix = `methodtrail-pos-v2|${String(DATA.project?.project_id || '')}|${String(DATA.session?.session_id || '')}`;
 const method = DATA.method_graph || {nodes:[], edges:[]};
 const memory = DATA.memory_graph || {nodes:[], edges:[]};
 function label(n){ return String(n.title || n.conclusion || n.method_family || n.card_id || n.variant_id || n.node_id || '').slice(0,25); }
