@@ -511,8 +511,9 @@ handling. Include an integrated first candidate plus component-level candidates 
 If the candidate set contains multiple useful families or components, consider
 an explicit composition or fusion challenger, but do not assume that composition
 is always the right direction. Do not treat useful families as mutually
-exclusive without evidence. Do not force a fixed number of candidates or pad
-the list; stop when the important design space is represented. Give substantive
+exclusive without evidence. Aim for at least four distinct candidates when
+four executable directions are available; do not pad the list with duplicates
+or cosmetic rewrites when the graph cannot support that breadth. Give substantive
 representation, model, objective, training, and composition alternatives
 priority over formatting-only changes when the output schema already works."""
             if initial
@@ -520,8 +521,8 @@ priority over formatting-only changes when the output schema already works."""
             """This is a refinement round. Use the graph evidence to focus on a small set of high-value, attributable
  changes. Prefer an unmeasured family, an explicit backtrack, or a controlled
 change that answers a visible question. Keep an executable alternative in the frontier when
-the evidence leaves a distinct family or factor untested. This can be an existing pending candidate;
-candidate count and method type remain evidence-driven. Preserve a local refinement when it tests a concrete unresolved cause. A
+the evidence leaves a distinct family or factor untested. Merge existing pending candidates with new
+proposals and aim to rank at least four distinct executable choices when available. Preserve a local refinement when it tests a concrete unresolved cause. A
 local calibration improvement does not make all other representation families
 ineligible."""
         )
@@ -542,11 +543,13 @@ ineligible."""
         user = _context(
             f"""{phase_instruction}
 
-Expand the project method graph with one or more new, executable method nodes.
-There is no fixed candidate count. Return only methods that add a distinct
-implementation, configuration, composition, or recovery possibility. Stop when
-the current question has enough relevant alternatives, and explain why in
-discovery_complete/discovery_reason. Do not repeat a method already present in
+Expand the project method graph with new, executable method nodes. Return only
+methods that add a distinct implementation, configuration, composition, or
+recovery possibility. Aim for at least four distinct choices when the task and
+history support four executable directions; the controller will also merge
+older pending candidates into the ranking. Do not pad with duplicates or
+reworded methods. Stop when the current question has enough relevant
+alternatives, and explain why in discovery_complete/discovery_reason. Do not repeat a method already present in
 the supplied graph context. Each candidate must be tied to the current
 hypothesis and one graph relation. Separate configuration-only changes from
 composition, implementation, and recovery changes. For every candidate fill

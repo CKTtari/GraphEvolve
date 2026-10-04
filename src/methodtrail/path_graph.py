@@ -432,11 +432,21 @@ class ExperimentPathGraph:
             "needs_evidence_outcome",
             "promising_outcome",
         }
-        return [
-            row
-            for row in self.method_pool(limit=limit)
-            if row.get("node_type") == "proposal" and row.get("status") in eligible
-        ]
+        rows = []
+        for node_id, data in self.graph.nodes(data=True):
+            if data.get("node_type") != "proposal" or data.get("status") not in eligible:
+                continue
+            row = dict(data)
+            row["node_id"] = node_id
+            rows.append(row)
+        rows.sort(
+            key=lambda row: (
+                -float(row.get("priority", 0.0) or 0.0),
+                int(row.get("iteration", 0) or 0),
+                str(row.get("node_id", "")),
+            )
+        )
+        return rows[:limit]
 
     def frontier_changes(self, limit: int = 50) -> list[tuple[str, ChangeRequestArtifact]]:
         """Rehydrate unexecuted method nodes for a later path comparison."""

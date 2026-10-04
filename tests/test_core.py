@@ -1765,6 +1765,41 @@ def test_budget_deadline_stops_cleanly_after_valid_run(tmp_path: Path) -> None:
     assert dashboard.exists()
 
 
+def test_dashboard_shows_brand_score_series_and_candidate_comparison(tmp_path: Path) -> None:
+    from methodtrail.dashboard import write_dashboard
+
+    target = write_dashboard(
+        tmp_path / "dashboard.html",
+        {
+            "project": {"project_id": "toy-dashboard"},
+            "session": {"session_id": "session", "status": "completed"},
+            "events": [
+                {"kind": "iteration_finished", "payload": {"iteration": 1, "metric": 0.8, "completed_research": True}},
+                {"kind": "iteration_finished", "payload": {"iteration": 2, "metric": 0.6, "completed_research": True}},
+            ],
+            "artifacts": [
+                {
+                    "kind": "candidate_priorities",
+                    "created_at": "2026-01-01T00:00:00Z",
+                    "payload": {
+                        "iteration": 2,
+                        "ranked": [
+                            {"priority": 0.9, "candidate": {"variant_id": "p", "title": "candidate"}, "graph_signal": {"feasible": True}}
+                        ],
+                    },
+                }
+            ],
+            "method_graph": {"nodes": [], "edges": []},
+            "memory_graph": {"nodes": [], "edges": []},
+        },
+    )
+    html = target.read_text(encoding="utf-8")
+    assert "GraphEvolve v" in html
+    assert "每轮主指标变化" in html
+    assert "每轮候选方法排序" in html
+    assert "__BRAND__" not in html
+
+
 def test_orchestrator_repairs_a_failed_generated_program(tmp_path: Path) -> None:
     template = tmp_path / "template"
     template.mkdir()

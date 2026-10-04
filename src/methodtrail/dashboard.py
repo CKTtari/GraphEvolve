@@ -8,6 +8,8 @@ from __future__ import annotations
 
 import json
 from html import escape
+from importlib.metadata import PackageNotFoundError
+from importlib.metadata import version as distribution_version
 from pathlib import Path
 from typing import Any
 
@@ -16,9 +18,18 @@ def write_dashboard(target: str | Path, payload: dict[str, Any]) -> Path:
     target_path = Path(target)
     target_path.parent.mkdir(parents=True, exist_ok=True)
     data = json.dumps(payload, ensure_ascii=False).replace("</", "<\\/")
-    title = escape(str(payload.get("project", {}).get("project_id", "MethodTrail")))
+    project_id = escape(str(payload.get("project", {}).get("project_id", "local")))
+    try:
+        release = distribution_version("graphevolve")
+    except PackageNotFoundError:
+        release = "0.1.0"
+    brand = escape(f"GraphEvolve v{release}")
+    document_title = escape(f"GraphEvolve v{release} · {project_id}")
     target_path.write_text(
-        _HTML_TEMPLATE.replace("__TITLE__", title).replace("__DATA__", data),
+        _HTML_TEMPLATE.replace("__BRAND__", brand)
+        .replace("__PROJECT__", project_id)
+        .replace("__DOCUMENT_TITLE__", document_title)
+        .replace("__DATA__", data),
         encoding="utf-8",
     )
     return target_path
@@ -29,7 +40,7 @@ _HTML_TEMPLATE = r'''<!doctype html>
 <head>
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
-<title>MethodTrail · __TITLE__</title>
+<title>__DOCUMENT_TITLE__</title>
 <style>
 :root { color-scheme: light; --bg:#f6f7f9; --panel:#ffffff; --line:#d9dee7; --text:#202631; --muted:#697386; --accent:#356ae6; --good:#2d8a63; --warn:#b7791f; --bad:#c4475a; }
 * { box-sizing:border-box; }
@@ -42,6 +53,7 @@ button { cursor:pointer; }
 .panel { background:var(--panel); border:1px solid var(--line); border-radius:10px; padding:12px; min-width:0; }
 .toolbar { display:flex; gap:8px; align-items:center; flex-wrap:wrap; margin-bottom:8px; }
 .toolbar span { color:var(--muted); }
+.project-name { color:var(--muted); font-size:12px; max-width:420px; overflow-wrap:anywhere; }
 #canvas { width:100%; height:650px; background:#fff; border-radius:6px; border:1px solid #d9dee7; touch-action:none; }
 .hint { color:var(--muted); margin:5px 0 0; }
 #details { overflow:auto; max-height:570px; color:var(--text); }
@@ -58,6 +70,28 @@ button { cursor:pointer; }
 #details pre { margin:7px 0 0; white-space:pre-wrap; overflow-wrap:anywhere; font:11px/1.5 ui-monospace,SFMono-Regular,Consolas,monospace; }
 .metric { font-size:20px; color:var(--good); margin:4px 0 10px; }
 .cards { display:grid; grid-template-columns:repeat(auto-fit,minmax(180px,1fr)); gap:8px; margin-top:10px; }
+.chart-panel { margin-top:10px; border:1px solid var(--line); border-radius:8px; padding:10px; background:#fff; }
+.chart-panel h3 { margin:0 0 4px; font-size:15px; }
+.chart-note { color:var(--muted); font-size:12px; margin-bottom:6px; }
+#scoreChart svg { width:100%; height:250px; display:block; }
+.score-grid { stroke:#edf0f4; stroke-width:1; }
+.score-axis { stroke:#aeb7c5; stroke-width:1; }
+.score-line { fill:none; stroke:var(--accent); stroke-width:2.5; }
+.score-dot { fill:#fff; stroke:var(--accent); stroke-width:2; cursor:pointer; }
+.score-dot.selected { fill:var(--warn); stroke:var(--warn); stroke-width:3; }
+.score-label { fill:var(--muted); font-size:10px; text-anchor:middle; }
+.score-value { fill:var(--text); font-size:10px; text-anchor:middle; }
+.score-y-label { fill:var(--muted); font-size:10px; text-anchor:end; }
+.candidate-summary { margin-top:8px; color:var(--muted); font-size:12px; }
+.candidate-table-wrap { overflow:auto; }
+.candidate-table { width:100%; border-collapse:collapse; font-size:12px; }
+.candidate-table th, .candidate-table td { text-align:left; padding:6px 7px; border-bottom:1px solid #edf0f4; vertical-align:top; }
+.candidate-table th { color:var(--muted); font-weight:600; white-space:nowrap; }
+.candidate-table .candidate-selected { background:#fff8e7; }
+.candidate-table .candidate-history { color:#596579; }
+.candidate-table .candidate-status { white-space:nowrap; }
+.candidate-table .candidate-title { min-width:220px; overflow-wrap:anywhere; }
+.candidate-table .priority { font-variant-numeric:tabular-nums; white-space:nowrap; }
 .card { border:1px solid var(--line); border-radius:6px; padding:9px; background:#fff; }
 .card b { color:var(--accent); }
 .event { border-left:3px solid var(--accent); padding:6px 9px; margin-top:7px; background:#f8fafc; border-radius:4px; }
@@ -88,8 +122,8 @@ svg text { font-family:inherit; }
 </style>
 </head>
 <body>
-<header><h1>MethodTrail · __TITLE__</h1><label>轮次 <select id="iteration"></select></label><button id="methodBtn">方法图</button><button id="memoryBtn">经验图</button><button id="allBtn">全部</button><span id="status"></span></header>
-<div class="layout"><main class="panel"><div class="toolbar"><span id="viewName">方法图</span><span>左键点击选择；按住左键拖动节点。箭头表示方向。</span><span id="relationHint"></span></div><svg id="canvas" viewBox="0 0 1000 570" preserveAspectRatio="xMidYMid meet"></svg><div id="summary" class="cards"></div></main><aside class="panel"><h2>节点或边详情</h2><div id="details">选择一个节点或有向边</div></aside></div>
+<header><h1>__BRAND__</h1><span class="project-name">__PROJECT__</span><label>轮次 <select id="iteration"></select></label><button id="methodBtn">方法图</button><button id="memoryBtn">经验图</button><button id="allBtn">全部</button><span id="status"></span></header>
+<div class="layout"><main class="panel"><div class="toolbar"><span id="viewName">方法图</span><span>左键点击选择；按住左键拖动节点。箭头表示方向。</span><span id="relationHint"></span></div><svg id="canvas" viewBox="0 0 1000 570" preserveAspectRatio="xMidYMid meet"></svg><section id="scoreChart" class="chart-panel"></section><section id="candidatePanel" class="chart-panel"></section><div id="summary" class="cards"></div></main><aside class="panel"><h2>节点或边详情</h2><div id="details">选择一个节点或有向边</div></aside></div>
 <script>
 const DATA = __DATA__;
 const $ = id => document.getElementById(id);
@@ -136,11 +170,106 @@ function changeOf(n){
 function visibleGraph(){
   const g = view === 'memory' ? memory : method;
   let nodes = (g.nodes || []).filter(n => n.node_type !== 'root' && n.variant_id !== '__project_root__' && n.id !== '__project_root__' && n.node_id !== '__project_root__');
-  nodes = nodes.filter(n => round === 'all' || String(n.iteration || '') === String(round));
+  nodes = nodes.filter(n => round === 'all' || (Number(n.iteration) || 0) <= Number(round));
   if (round !== 'all' && !nodes.length) nodes = (g.nodes || []).filter(n => n.node_type !== 'root' && n.variant_id !== '__project_root__' && n.id !== '__project_root__' && n.node_id !== '__project_root__');
   const ids = new Set(nodes.flatMap(nodeIds));
   let edges = (g.edges || []).filter(e => ids.has(String(e.source)) && ids.has(String(e.target)));
   return {nodes, edges};
+}
+function metricSeries(){
+  const byRound=new Map();
+  (DATA.events||[]).forEach(event=>{
+    if(event.kind!=='iteration_finished')return;
+    const payload=event.payload||{}, iteration=Number(payload.iteration), metric=Number(payload.metric);
+    if(payload.metric==null || payload.metric==='' || !Number.isFinite(iteration) || !Number.isFinite(metric) || payload.completed_research===false)return;
+    byRound.set(iteration,{iteration,metric,decision:payload.decision||'',variant_id:payload.variant_id||''});
+  });
+  return [...byRound.values()].sort((a,b)=>a.iteration-b.iteration);
+}
+function prioritySeries(){
+  const items=(DATA.artifacts||[]).filter(item=>item.kind==='candidate_priorities' && item.payload?.ranked);
+  items.sort((a,b)=>String(a.created_at||'').localeCompare(String(b.created_at||'')));
+  return items.map((item,index)=>({
+    iteration:Number(item.payload.iteration)||index+1,
+    parent_variant_id:item.payload.parent_variant_id||'',
+    ranked:item.payload.ranked||[],
+  }));
+}
+function svgNode(name, attrs={}){
+  const node=document.createElementNS('http://www.w3.org/2000/svg',name);
+  Object.entries(attrs).forEach(([key,value])=>node.setAttribute(key,String(value)));
+  return node;
+}
+function formatMetric(value){
+  return Number(value).toLocaleString(undefined,{maximumFractionDigits:6});
+}
+function renderScoreChart(){
+  const box=$('scoreChart'); box.replaceChildren();
+  const series=metricSeries();
+  const heading=document.createElement('h3'); heading.textContent='每轮主指标变化'; box.appendChild(heading);
+  if(!series.length){
+    const empty=document.createElement('div'); empty.className='chart-note'; empty.textContent='暂无已完成研究轮次的独立评测指标'; box.appendChild(empty); return;
+  }
+  const values=series.map(item=>item.metric), minValue=Math.min(...values), maxValue=Math.max(...values);
+  const span=Math.max(maxValue-minValue,Math.abs(maxValue)*0.04,0.000001), low=minValue-span*0.12, high=maxValue+span*0.12;
+  const width=960, height=240, left=62, right=24, top=24, bottom=42, plotWidth=width-left-right, plotHeight=height-top-bottom;
+  const svg=svgNode('svg',{viewBox:`0 0 ${width} ${height}`,role:'img','aria-label':'每轮主指标折线图'});
+  for(let index=0;index<=4;index++){
+    const value=high-(high-low)*index/4, y=top+plotHeight*index/4;
+    svg.appendChild(svgNode('line',{x1:left,y1:y,x2:width-right,y2:y,class:'score-grid'}));
+    const text=svgNode('text',{x:left-8,y:y+3,class:'score-y-label'}); text.textContent=formatMetric(value); svg.appendChild(text);
+  }
+  svg.appendChild(svgNode('line',{x1:left,y1:top+plotHeight,x2:width-right,y2:top+plotHeight,class:'score-axis'}));
+  const points=series.map((item,index)=>{
+    const x=left+plotWidth*(series.length===1?0.5:index/(series.length-1));
+    const y=top+plotHeight*(high-item.metric)/(high-low);
+    return {item,x,y};
+  });
+  svg.appendChild(svgNode('polyline',{points:points.map(point=>`${point.x},${point.y}`).join(' '),class:'score-line'}));
+  points.forEach(({item,x,y})=>{
+    const dot=svgNode('circle',{cx:x,cy:y,r:4,class:`score-dot${round===String(item.iteration)?' selected':''}`});
+    const title=svgNode('title'); title.textContent=`第${item.iteration}轮 · ${formatMetric(item.metric)} · ${item.decision||'完成'}`; dot.appendChild(title); svg.appendChild(dot);
+    const value=svgNode('text',{x,y:y-10,class:'score-value'}); value.textContent=formatMetric(item.metric); svg.appendChild(value);
+    const label=svgNode('text',{x,y:height-19,class:'score-label'}); label.textContent=`第${item.iteration}轮`; svg.appendChild(label);
+  });
+  box.appendChild(svg);
+  const note=document.createElement('div'); note.className='chart-note';
+  note.textContent=`${series.length} 个已完成研究轮次 · 最新 ${formatMetric(series.at(-1).metric)} · 最小 ${formatMetric(minValue)} · 最大 ${formatMetric(maxValue)}；折线按研究轮次连接，具体指标方向由任务合同决定`;
+  box.appendChild(note);
+}
+function renderCandidatePanel(){
+  const box=$('candidatePanel'); box.replaceChildren();
+  const heading=document.createElement('h3'); heading.textContent='每轮候选方法排序'; box.appendChild(heading);
+  const all=prioritySeries();
+  let selected=round==='all'?all.at(-1):all.filter(item=>String(item.iteration)===String(round)).at(-1);
+  if(!selected && round!=='all')selected=all.at(-1);
+  if(!selected){
+    const empty=document.createElement('div'); empty.className='chart-note'; empty.textContent='暂无候选排序记录'; box.appendChild(empty); return;
+  }
+  const rows=selected.ranked, methodNodes=method.nodes||[];
+  const source=document.createElement('div'); source.className='candidate-summary';
+  const newCount=rows.filter(row=>{const node=methodNodes.find(item=>nodeIds(item).includes(String(row.candidate?.variant_id))); return node && Number(node.iteration)===Number(selected.iteration);}).length;
+  const oldCount=rows.length-newCount;
+  source.textContent=`第${selected.iteration}轮实际排序 ${rows.length} 个候选：本轮新增 ${newCount} 个，历史候选/回溯分支 ${oldCount} 个。${rows.length<4?'当前少于4个可比较候选。':'已达到至少4个候选的比较要求。'}${round==='all'?'（当前显示最近一轮；选择轮次可查看对应批次）':''}`;
+  box.appendChild(source);
+  const wrap=document.createElement('div'); wrap.className='candidate-table-wrap';
+  const table=document.createElement('table'); table.className='candidate-table';
+  const head=document.createElement('thead'); head.innerHTML='<tr><th>排序</th><th>候选方法</th><th>关系</th><th>优先级</th><th>状态</th></tr>'; table.appendChild(head);
+  const body=document.createElement('tbody');
+  const selectedVariant=metricSeries().find(item=>item.iteration===selected.iteration)?.variant_id;
+  rows.forEach((row,index)=>{
+    const candidate=row.candidate||{}, node=methodNodes.find(item=>nodeIds(item).includes(String(candidate.variant_id))), originalIteration=node?.iteration;
+    const tr=document.createElement('tr');
+    if(String(candidate.variant_id)===String(selectedVariant))tr.className='candidate-selected';
+    const rank=document.createElement('td'); rank.textContent=String(index+1); tr.appendChild(rank);
+    const title=document.createElement('td'); title.className='candidate-title'; title.textContent=String(candidate.title||node?.title||candidate.method?.family||'未命名方法');
+    if(originalIteration!=null && Number(originalIteration)!==Number(selected.iteration))title.classList.add('candidate-history'); tr.appendChild(title);
+    const relation=document.createElement('td'); relation.textContent=String(candidate.relation||''); tr.appendChild(relation);
+    const priority=document.createElement('td'); priority.className='priority'; priority.textContent=Number.isFinite(Number(row.priority))?Number(row.priority).toFixed(4):'不可用'; tr.appendChild(priority);
+    const status=document.createElement('td'); status.className='candidate-status'; status.textContent=row.graph_signal?.feasible===false?'预算不可行':(String(candidate.variant_id)===String(selectedVariant)?'本轮已执行':(originalIteration!=null && Number(originalIteration)!==Number(selected.iteration)?'历史候选':'待选')); tr.appendChild(status);
+    body.appendChild(tr);
+  });
+  table.appendChild(body); wrap.appendChild(table); box.appendChild(wrap);
 }
 function layout(nodes, edges){
   const positions=new Map(), points=new Map(), groups=[...new Set(nodes.map(groupKey))];
@@ -248,6 +377,8 @@ function draw(){
   const eventHtml=shown.slice(-6).map(e=>{const p=e.payload||{}; const bad=e.kind==='technical_attempt'; return `<div class="event ${bad?'bad':'good'}"><b>${e.kind}</b> · 第${p.iteration||'?'}轮 · ${p.decision||p.reason||''}<br>指标：${p.metric==null?'未测得':p.metric} ${p.next_question?'<br>下一问题：'+p.next_question:''}</div>`;}).join('');
   const groups=[...new Set(nodes.map(groupKey))]; const legend=groups.map(g=>`<span style="color:${groupColor(g)}">● ${g}</span>`).join(' · ');
   $('summary').innerHTML = `<div class="card"><b>节点</b><br>${nodes.length}</div><div class="card"><b>有向关系</b><br>${edges.length}</div><div class="card"><b>方法族</b><br>${groups.length}<br>${legend}</div>${eventHtml}`;
+  renderScoreChart();
+  renderCandidatePanel();
 }
 const FIELD_LABELS={
   id:'节点 ID', title:'标题', node_type:'节点类型', iteration:'研究轮次',
@@ -326,7 +457,7 @@ function showEdgeDetails(e){
 }
 function init(){
   const iterations=new Set(['all']); [...(method.nodes||[]),...(memory.nodes||[])].forEach(n=>{if(n.iteration!=null)iterations.add(String(n.iteration));});
-  $('iteration').innerHTML=[...iterations].map(x=>`<option value="${x}">${x==='all'?'全部':('第 '+x+' 轮')}</option>`).join('');
+  $('iteration').innerHTML=[...iterations].map(x=>`<option value="${x}">${x==='all'?'全部':('截至第 '+x+' 轮')}</option>`).join('');
   $('iteration').onchange=e=>{round=e.target.value;selectedNodeId=null;selectedEdgeKey=null;draw();};
   $('canvas').addEventListener('pointermove',moveDrag); $('canvas').addEventListener('pointerup',endDrag); $('canvas').addEventListener('pointercancel',endDrag);
   $('canvas').addEventListener('contextmenu',event=>event.preventDefault());

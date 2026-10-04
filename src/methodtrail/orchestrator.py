@@ -48,6 +48,7 @@ from .schemas import (
 from .workspace import WorkspaceManager
 
 logger = logging.getLogger(__name__)
+MIN_COMPARISON_CANDIDATES = 4
 
 
 @dataclass
@@ -312,7 +313,15 @@ class MethodTrail:
             )
         priority_id = self.store.put(
             "candidate_priorities",
-            {"weights": weights.model_dump(mode="json"), "ranked": ranked_payload},
+            {
+                "iteration": state.iteration,
+                "parent_variant_id": graph_parent_variant_id,
+                "comparison_floor": MIN_COMPARISON_CANDIDATES,
+                "comparison_count": len(ranked_payload),
+                "comparison_floor_met": len(ranked_payload) >= MIN_COMPARISON_CANDIDATES,
+                "weights": weights.model_dump(mode="json"),
+                "ranked": ranked_payload,
+            },
             [proposal_id],
         )
         selection = self.choose.select(contract, state, hypothesis, feasible_ranked)
