@@ -229,9 +229,10 @@ function renderDetails(kind, title, payload){
 function showDetails(n){
   selectedNodeId=nodeId(n); selectedEdgeKey=null;
   renderDetails('节点', label(n), {
-    id:nodeId(n), node_type:n.node_type, iteration:n.iteration,
+    id:nodeId(n), title:n.title, node_type:n.node_type, iteration:n.iteration,
+    parent_variant_id:n.parent_variant_id, evidence_parent_ids:n.evidence_parent_ids,
     method_family:n.method_family || n.method?.family, relation:n.relation,
-    status:n.status, metric:n.metric, question:n.question,
+    status:n.status, decision:n.decision, metric:n.metric, wall_seconds:n.wall_seconds, question:n.question,
     change_logic:n.change_logic || n.change?.change_logic,
     changed_factors:n.changed_factors || n.method?.changed_factors,
     method_components:n.method_components || n.method?.components,
