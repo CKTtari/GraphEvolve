@@ -677,13 +677,27 @@ class ExperimentPathGraph:
             or node.get("node_id") == ROOT_NODE_ID
             or node.get("variant_id") == ROOT_NODE_ID
         }
+        origin_ids = {
+            str(edge.get("target"))
+            for edge in data.get("edges", [])
+            if edge.get("edge_type") == "root" and str(edge.get("target")) not in hidden
+        }
+        nodes = []
+        for node in data.get("nodes", []):
+            node_id = str(node.get("id", node.get("node_id", node.get("variant_id", ""))))
+            if node_id in hidden:
+                continue
+            exported = dict(node)
+            if node_id in origin_ids:
+                # The synthetic project root is intentionally not rendered.
+                # Preserve its meaning on the first method nodes so they are
+                # visibly origins rather than unexplained isolated nodes.
+                exported["origin"] = True
+                exported["origin_reason"] = "首轮候选或结果，没有可追溯的代码父版本。"
+            nodes.append(exported)
         return {
             "directed": True,
-            "nodes": [
-                node
-                for node in data.get("nodes", [])
-                if str(node.get("id", node.get("node_id", node.get("variant_id", "")))) not in hidden
-            ],
+            "nodes": nodes,
             "edges": [
                 edge
                 for edge in data.get("edges", [])
@@ -1038,7 +1052,8 @@ class ExperimentPathGraph:
         rows = [
             (self._relevance(node_id, query, 0), self._row(node_id, "recent_history", 0))
             for node_id in self.graph.nodes
-            if self.graph.nodes[node_id].get("node_type") != "proposal"
+            if self.graph.nodes[node_id].get("node_type") not in {"proposal", "root"}
+            and node_id != ROOT_NODE_ID
         ]
         return self._deduplicate(rows, limit)
 

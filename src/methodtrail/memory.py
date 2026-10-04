@@ -160,6 +160,9 @@ class MemoryGraph:
                 ),
                 shared_factors=shared_factors,
             )
+        node["origin"] = not any(
+            edge.get("target") == card.card_id for edge in self.edges
+        )
         if persist:
             self._save()
 
@@ -176,10 +179,18 @@ class MemoryGraph:
         cards = [node for node in self.nodes.values() if node.get("task_id") == task_id]
         decisions = Counter(str(node.get("decision", "unknown")) for node in cards)
         families = Counter(str(node.get("method_family", "unspecified")) for node in cards)
+        edge_types = Counter(
+            str(edge.get("edge_type", "related"))
+            for edge in self.edges
+            if self.nodes.get(edge.get("source"), {}).get("task_id") == task_id
+            and self.nodes.get(edge.get("target"), {}).get("task_id") == task_id
+        )
         return {
+            "directed": True,
             "card_count": len(cards),
             "decisions": dict(decisions),
             "method_families": dict(families),
+            "edge_types": dict(edge_types),
             "linked_card_count": sum(
                 1
                 for edge in self.edges
@@ -199,7 +210,7 @@ class MemoryGraph:
         limit: int = 8,
         max_depth: int = 3,
     ) -> list[dict[str, Any]]:
-        """Trace directed ancestors first, then descendants, from lexical seeds."""
+        """Trace directed ancestors first, then descendants, from graph seeds."""
 
         incoming: defaultdict[str, list[dict[str, Any]]] = defaultdict(list)
         outgoing: defaultdict[str, list[dict[str, Any]]] = defaultdict(list)
@@ -254,6 +265,53 @@ class MemoryGraph:
                 }
                 queue.append((next_id, depth + 1, next_path, next_edges))
         return sorted(found.values(), key=lambda item: item["score"], reverse=True)[:limit]
+
+    def local_trace(
+        self, card_id: str, task_id: str, limit: int = 8
+    ) -> dict[str, Any]:
+        """Return the immediate directed provenance around one card.
+
+        Lexical retrieval can select a card directly, without traversing the
+        graph first. Returning its incoming and outgoing edges keeps the
+        card's position and branch meaning visible to the Agent in that case.
+        """
+
+        card_id = str(card_id)
+        if self.nodes.get(card_id, {}).get("task_id") != task_id:
+            return {
+                "card_id": card_id,
+                "score": 0.0,
+                "distance": 0,
+                "path": [card_id],
+                "edges": [],
+            }
+        edges: list[dict[str, Any]] = []
+        for edge in self.edges:
+            source = str(edge.get("source"))
+            target = str(edge.get("target"))
+            if source != card_id and target != card_id:
+                continue
+            other = source if target == card_id else target
+            if self.nodes.get(other, {}).get("task_id") != task_id:
+                continue
+            edges.append(
+                {
+                    "source": source,
+                    "target": target,
+                    "relation": edge.get("relation"),
+                    "edge_type": edge.get("edge_type"),
+                    "reason": edge.get("reason", ""),
+                    "target_change": edge.get("target_change", {}),
+                    "direction": "ancestor" if target == card_id else "descendant",
+                }
+            )
+        return {
+            "card_id": card_id,
+            "score": 1.0,
+            "distance": 0,
+            "path": [card_id],
+            "edges": edges[:limit],
+        }
 
     def _edge(
         self,
@@ -322,14 +380,31 @@ class ExperimentMemory:
         self.graph.add(card)
         return card
 
-    def search(self, task_id: str, query: str, limit: int = 6) -> list[dict[str, Any]]:
-        """Retrieve lexical matches plus connected conclusions from the memory graph."""
+    def search(
+        self,
+        task_id: str,
+        query: str,
+        limit: int = 6,
+        seed_variant_ids: list[str] | None = None,
+    ) -> list[dict[str, Any]]:
+        """Retrieve directed history anchored at active variants.
+
+        Variant anchors are the primary retrieval path: their incoming and
+        outgoing graph relations are traced first. Lexical overlap only ranks
+        additional cards when the question names a comparable method or
+        factor that is not already on that directed path.
+        """
 
         tokens = set(_tokens(query))
         cards = [card for card in self._read() if card.task_id == task_id]
         scored: list[tuple[float, int, MemoryCard, str]] = []
         by_id = {card.card_id: card for card in cards}
         seed_ids: list[str] = []
+        requested_variants = {str(value) for value in (seed_variant_ids or []) if value}
+        for position, card in enumerate(reversed(cards)):
+            if str(card.variant_id) in requested_variants:
+                seed_ids.append(card.card_id)
+                scored.append((2.0, -position, card, "graph_anchor"))
         for position, card in enumerate(reversed(cards)):
             searchable = " ".join(
                 [
@@ -343,10 +418,17 @@ class ExperimentMemory:
             ).lower()
             overlap = sum(token in searchable for token in tokens)
             if overlap:
-                seed_ids.append(card.card_id)
+                if card.card_id not in seed_ids:
+                    seed_ids.append(card.card_id)
                 # Earlier tuple component is relevance; the second keeps newer
                 # equally relevant cards ahead without hiding the score.
                 scored.append((float(overlap), -position, card, "lexical"))
+        if not seed_ids and cards:
+            # A graph should still provide a starting point when the current
+            # question uses vocabulary that does not occur in old cards.
+            latest = cards[-1]
+            seed_ids.append(latest.card_id)
+            scored.append((0.05, 0, latest, "memory_graph_seed"))
         related_paths = self.graph.related_paths(seed_ids, task_id, limit=max(limit, 8))
         related_meta = {item["card_id"]: item for item in related_paths}
         for item in related_paths:
@@ -362,8 +444,10 @@ class ExperimentMemory:
                 continue
             seen.add(card.card_id)
             row = {"relevance": score, "retrieval_source": source, **card.model_dump(mode="json")}
-            if source == "memory_graph":
-                row["memory_graph_trace"] = related_meta.get(card.card_id, {})
+            row["memory_graph_trace"] = related_meta.get(
+                card.card_id,
+                self.graph.local_trace(card.card_id, task_id),
+            )
             chosen.append(row)
             if len(chosen) >= limit:
                 break

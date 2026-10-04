@@ -1815,7 +1815,11 @@ class MethodTrail:
                     maximize_metric=contract.maximize_metric
                 )
             ],
-            memory_context=self.experiment_memory.search(contract.task_id, query),
+            memory_context=self.experiment_memory.search(
+                contract.task_id,
+                query,
+                seed_variant_ids=[parent_variant_id] if parent_variant_id else None,
+            ),
             method_pool=self.graph.method_pool(limit=100),
             memory_graph_context=self.experiment_memory.graph_profile(contract.task_id),
         )

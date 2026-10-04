@@ -47,7 +47,15 @@ button { cursor:pointer; }
 #details { overflow:auto; max-height:570px; color:var(--text); }
 #details h3 { margin:0 0 8px; font-size:16px; }
 #details .detail-kind { color:var(--muted); font-size:12px; margin-bottom:8px; }
-#details pre { margin:0; white-space:pre-wrap; overflow-wrap:anywhere; font:12px/1.55 ui-monospace,SFMono-Regular,Consolas,monospace; }
+#details .detail-row { display:grid; grid-template-columns:112px minmax(0,1fr); gap:8px; padding:7px 0; border-bottom:1px solid #edf0f4; align-items:start; }
+#details .detail-label { color:var(--muted); font-size:12px; }
+#details .detail-value { white-space:pre-wrap; overflow-wrap:anywhere; color:var(--text); }
+#details .detail-value.metric { color:var(--good); font-weight:700; }
+#details .detail-list { margin:0; padding-left:18px; }
+#details .detail-object { display:grid; gap:4px; }
+#details .raw-details { margin-top:12px; border-top:1px solid var(--line); padding-top:8px; }
+#details .raw-details summary { cursor:pointer; color:var(--muted); font-size:12px; }
+#details pre { margin:7px 0 0; white-space:pre-wrap; overflow-wrap:anywhere; font:11px/1.5 ui-monospace,SFMono-Regular,Consolas,monospace; }
 .metric { font-size:20px; color:var(--good); margin:4px 0 10px; }
 .cards { display:grid; grid-template-columns:repeat(auto-fit,minmax(180px,1fr)); gap:8px; margin-top:10px; }
 .card { border:1px solid var(--line); border-radius:6px; padding:9px; background:#fff; }
@@ -71,15 +79,17 @@ svg text { font-family:inherit; }
 .node:active { cursor:grabbing; }
 .node.proposal { stroke:#356ae6; }
 .node.outcome { stroke:#3d9a70; }
+.node.origin { stroke-dasharray:4 2; }
 .node.failed { stroke:#c4475a; }
 .node.selected { stroke:#b7791f; stroke-width:4; }
 .node-text { fill:#202631; font-size:11px; pointer-events:none; text-anchor:middle; }
+.node-round { fill:#4b5565; font-size:8px; pointer-events:none; text-anchor:middle; }
 @media(max-width:900px){ .layout{grid-template-columns:1fr;} #details{max-height:none;} }
 </style>
 </head>
 <body>
 <header><h1>MethodTrail · __TITLE__</h1><label>轮次 <select id="iteration"></select></label><button id="methodBtn">方法图</button><button id="memoryBtn">经验图</button><button id="allBtn">全部</button><span id="status"></span></header>
-<div class="layout"><main class="panel"><div class="toolbar"><span id="viewName">方法图</span><span>箭头表示方向；点击节点或边查看修改逻辑、内容和证据</span></div><svg id="canvas" viewBox="0 0 1000 570" preserveAspectRatio="xMidYMid meet"></svg><div id="summary" class="cards"></div></main><aside class="panel"><h2>节点或边详情</h2><div id="details">选择一个节点或有向边</div></aside></div>
+<div class="layout"><main class="panel"><div class="toolbar"><span id="viewName">方法图</span><span>左键点击选择；按住左键拖动节点。箭头表示方向。</span><span id="relationHint"></span></div><svg id="canvas" viewBox="0 0 1000 570" preserveAspectRatio="xMidYMid meet"></svg><div id="summary" class="cards"></div></main><aside class="panel"><h2>节点或边详情</h2><div id="details">选择一个节点或有向边</div></aside></div>
 <script>
 const DATA = __DATA__;
 const $ = id => document.getElementById(id);
@@ -108,7 +118,10 @@ function persistPositions(){
   try{ localStorage.setItem(positionStoragePrefix+'|'+activeGraphKey, JSON.stringify(Object.fromEntries(activePositions))); }catch(_){ }
 }
 function edgeLabel(e){
-  return String(e.relation||e.edge_type||e.label||'relation').replaceAll('_',' ');
+  const base=String(e.relation||e.edge_type||e.label||'relation').replaceAll('_',' ');
+  const targetChange=e.target_change||{};
+  if(view==='memory' && targetChange.iteration!=null) return `${base} · 第${targetChange.iteration}轮`;
+  return base;
 }
 function edgeKey(e){ return `${String(e.source)}→${String(e.target)}|${String(e.edge_type||e.relation||'')}`; }
 function findNode(id){ const wanted=String(id); return (view==='memory'?memory:method).nodes.find(n=>nodeIds(n).includes(wanted)); }
@@ -153,14 +166,20 @@ function svgPoint(event){
   return point.matrixTransform(svg.getScreenCTM().inverse());
 }
 function startDrag(event, node){
-  event.preventDefault(); event.stopPropagation();
+  if(event.button!=null && event.button!==0)return;
+  event.stopPropagation();
   const ids=nodeIds(node), id=nodeId(node), point=svgPoint(event), old=activePositions.get(id);
-  dragging={ids, id, node, offsetX:old.x-point.x, offsetY:old.y-point.y, pointerId:event.pointerId};
-  lastDragMoved=false; $('canvas').setPointerCapture(event.pointerId);
+  dragging={ids, id, node, startX:point.x, startY:point.y, offsetX:old.x-point.x, offsetY:old.y-point.y, pointerId:event.pointerId, captured:false};
+  lastDragMoved=false;
 }
 function moveDrag(event){
   if(!dragging || !activePositions)return;
   const point=svgPoint(event), p={x:point.x+dragging.offsetX,y:point.y+dragging.offsetY};
+  if(!dragging.captured && Math.hypot(point.x-dragging.startX,point.y-dragging.startY)<=4)return;
+  if(!dragging.captured){
+    dragging.captured=true;
+    try{$('canvas').setPointerCapture(dragging.pointerId);}catch(_){ }
+  }
   p.x=Math.max(30,Math.min(970,p.x)); p.y=Math.max(30,Math.min(620,p.y));
   const old=activePositions.get(dragging.id); if(Math.hypot(p.x-old.x,p.y-old.y)<1)return;
   dragging.ids.forEach(id=>activePositions.set(id,p)); persistPositions(); lastDragMoved=true; draw(true);
@@ -168,15 +187,17 @@ function moveDrag(event){
 function endDrag(event){
   if(!dragging)return;
   const finished=dragging;
-  try{$('canvas').releasePointerCapture(finished.pointerId);}catch(_){ }
+  if(finished.captured){try{$('canvas').releasePointerCapture(finished.pointerId);}catch(_){ }}
   dragging=null;
-  if(!lastDragMoved && finished.node) showDetails(finished.node);
   if(lastDragMoved)setTimeout(()=>{lastDragMoved=false;},0);
 }
 function draw(){
   const svg = $('canvas'); while(svg.firstChild) svg.removeChild(svg.firstChild);
   const g = visibleGraph(), nodes=g.nodes, edges=g.edges;
   $('viewName').textContent = view === 'memory' ? '经验图' : '方法图';
+  $('relationHint').textContent = view === 'memory'
+    ? '经验图：箭头为前序证据 → 后续实验；follows=父版本，informed by=决策依据，same family/shared factor=相关证据'
+    : '方法图：箭头只表示方法关系；轮次和修改逻辑在节点详情中查看';
   const graphKey=view+'|'+round;
   let positions=positionStore.get(graphKey);
   if(!positions){ positions=restorePositions(graphKey,layout(nodes, edges)); positionStore.set(graphKey,positions); }
@@ -208,11 +229,17 @@ function draw(){
     const group=document.createElementNS('http://www.w3.org/2000/svg','g');
     const c=document.createElementNS('http://www.w3.org/2000/svg','circle');
     c.setAttribute('cx',p.x);c.setAttribute('cy',p.y);c.setAttribute('r',34);c.setAttribute('fill',groupColor(groupKey(n)));
-    c.setAttribute('class','node '+(n.node_type||'')+(n.status==='failed'?' failed':'')+(selectedNodeId===nodeId(n)?' selected':''));
+    c.setAttribute('class','node '+(n.node_type||'')+(n.origin?' origin':'')+(n.status==='failed'?' failed':'')+(selectedNodeId===nodeId(n)?' selected':''));
     group.onpointerdown=e=>startDrag(e,n);
     group.onclick=e=>{e.stopPropagation();if(!lastDragMoved)showDetails(n);};
     group.appendChild(c);
+    const title=document.createElementNS('http://www.w3.org/2000/svg','title');
+    title.textContent=`${n.iteration==null?'':`第${n.iteration}轮 · `}${String(n.title||n.conclusion||n.method_family||'')}`;
+    group.appendChild(title);
     const t=document.createElementNS('http://www.w3.org/2000/svg','text');t.setAttribute('x',p.x);t.setAttribute('y',p.y+4);t.setAttribute('class','node-text');t.textContent=label(n);group.appendChild(t);svg.appendChild(group);
+    if(n.iteration!=null){
+      const r=document.createElementNS('http://www.w3.org/2000/svg','text');r.setAttribute('x',p.x);r.setAttribute('y',p.y+20);r.setAttribute('class','node-round');r.textContent=`${n.origin?'起点 · ':''}第${n.iteration}轮`;group.appendChild(r);
+    }
   });
   const events=(DATA.events||[]).filter(e=>['iteration_finished','technical_attempt','research_stop'].includes(e.kind));
   const shown=round==='all'?events:events.filter(e=>String(e.payload?.iteration||'')===String(round));
@@ -220,16 +247,60 @@ function draw(){
   const groups=[...new Set(nodes.map(groupKey))]; const legend=groups.map(g=>`<span style="color:${groupColor(g)}">● ${g}</span>`).join(' · ');
   $('summary').innerHTML = `<div class="card"><b>节点</b><br>${nodes.length}</div><div class="card"><b>有向关系</b><br>${edges.length}</div><div class="card"><b>方法族</b><br>${groups.length}<br>${legend}</div>${eventHtml}`;
 }
+const FIELD_LABELS={
+  id:'节点 ID', title:'标题', node_type:'节点类型', iteration:'研究轮次',
+  parent_variant_id:'代码父版本', evidence_parent_ids:'证据父版本', method_family:'方法族',
+  relation:'关系', edge_type:'边类型', direction:'方向', status:'状态', decision:'评估决定',
+  metric:'主指标', wall_seconds:'运行时间（秒）', question:'研究问题', change_logic:'修改逻辑',
+  changed_factors:'改动因素', method_components:'方法组件', conclusion:'经验结论',
+  evidence_summary:'证据摘要', applicable_conditions:'适用条件', reason:'关系说明',
+  shared_factors:'共享改动因素', target_change:'目标节点的本轮修改', source:'来源节点', target:'目标节点'
+};
+function detailValue(parent,key,value,depth=0){
+  if(value==null || value==='' || (Array.isArray(value)&&value.length===0)){parent.textContent='未记录';return;}
+  if(depth>2 && typeof value==='object'){parent.textContent=JSON.stringify(value);return;}
+  if(Array.isArray(value)){
+    const list=document.createElement('ul'); list.className='detail-list';
+    value.forEach(item=>{const li=document.createElement('li'); detailValue(li,'',item,depth+1); list.appendChild(li);});
+    parent.appendChild(list); return;
+  }
+  if(typeof value==='object'){
+    const object=document.createElement('div'); object.className='detail-object';
+    Object.entries(value).forEach(([childKey,childValue])=>{
+      const row=document.createElement('div'); row.className='detail-row';
+      const label=document.createElement('div'); label.className='detail-label'; label.textContent=FIELD_LABELS[childKey]||childKey;
+      const body=document.createElement('div'); body.className='detail-value'; detailValue(body,childKey,childValue,depth+1);
+      row.append(label,body); object.appendChild(row);
+    });
+    parent.appendChild(object); return;
+  }
+  parent.textContent=String(value);
+  if(key==='metric')parent.classList.add('metric');
+}
 function renderDetails(kind, title, payload){
   const box=$('details'); box.replaceChildren();
   const h=document.createElement('h3'); h.textContent=title; box.appendChild(h);
   const k=document.createElement('div'); k.className='detail-kind'; k.textContent=kind; box.appendChild(k);
-  const pre=document.createElement('pre'); pre.textContent=JSON.stringify(payload,null,2); box.appendChild(pre);
+  if(payload && typeof payload==='object' && !Array.isArray(payload)){
+    Object.entries(payload).forEach(([key,value])=>{
+      const row=document.createElement('div'); row.className='detail-row';
+      const label=document.createElement('div'); label.className='detail-label'; label.textContent=FIELD_LABELS[key]||key;
+      const body=document.createElement('div'); body.className='detail-value'; detailValue(body,key,value);
+      row.append(label,body); box.appendChild(row);
+    });
+  }else{
+    const body=document.createElement('div'); body.className='detail-value'; detailValue(body,'',payload); box.appendChild(body);
+  }
+  if(payload && typeof payload==='object'){
+    const raw=document.createElement('details'); raw.className='raw-details';
+    const summary=document.createElement('summary'); summary.textContent='查看原始数据'; raw.appendChild(summary);
+    const pre=document.createElement('pre'); pre.textContent=JSON.stringify(payload,null,2); raw.appendChild(pre); box.appendChild(raw);
+  }
 }
 function showDetails(n){
   selectedNodeId=nodeId(n); selectedEdgeKey=null;
-  renderDetails('节点', label(n), {
-    id:nodeId(n), title:n.title, node_type:n.node_type, iteration:n.iteration,
+  renderDetails('节点', String(n.title || n.conclusion || n.method_family || label(n)), {
+    id:nodeId(n), title:n.title, node_type:n.node_type, origin:n.origin, origin_reason:n.origin_reason, iteration:n.iteration,
     parent_variant_id:n.parent_variant_id, evidence_parent_ids:n.evidence_parent_ids,
     method_family:n.method_family || n.method?.family, relation:n.relation,
     status:n.status, decision:n.decision, metric:n.metric, wall_seconds:n.wall_seconds, question:n.question,
@@ -244,8 +315,8 @@ function showDetails(n){
 function showEdgeDetails(e){
   selectedEdgeKey=edgeKey(e); selectedNodeId=null;
   const source=findNode(e.source), target=findNode(e.target);
-  renderDetails('有向边', `${edgeLabel(e)} · ${label(target||{})}`, {
-    source:{id:e.source,title:source&&label(source)}, target:{id:e.target,title:target&&label(target)},
+  renderDetails('有向边', `${edgeLabel(e)} · ${String(target?.title || label(target||{}))}`, {
+    source:{id:e.source,title:source&&String(source.title || label(source))}, target:{id:e.target,title:target&&String(target.title || label(target))},
     relation:e.relation, edge_type:e.edge_type, direction:'source → target', reason:e.reason,
     shared_factors:e.shared_factors||[], target_change:e.target_change||changeOf(target),
   });
@@ -256,6 +327,7 @@ function init(){
   $('iteration').innerHTML=[...iterations].map(x=>`<option value="${x}">${x==='all'?'全部':('第 '+x+' 轮')}</option>`).join('');
   $('iteration').onchange=e=>{round=e.target.value;selectedNodeId=null;selectedEdgeKey=null;draw();};
   $('canvas').addEventListener('pointermove',moveDrag); $('canvas').addEventListener('pointerup',endDrag); $('canvas').addEventListener('pointercancel',endDrag);
+  $('canvas').addEventListener('contextmenu',event=>event.preventDefault());
   $('canvas').addEventListener('click',event=>{if(event.target===$('canvas')){selectedNodeId=null;selectedEdgeKey=null;renderDetails('图','未选择','点击节点或有向边查看详情');draw();}});
   $('methodBtn').onclick=()=>{view='method';selectedNodeId=null;selectedEdgeKey=null;draw();};
   $('memoryBtn').onclick=()=>{view='memory';selectedNodeId=null;selectedEdgeKey=null;draw();};

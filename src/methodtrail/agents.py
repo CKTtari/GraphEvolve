@@ -77,6 +77,8 @@ def _compact_node(value: Any, *, include_change: bool = False) -> dict[str, Any]
         "card_id",
         "variant_id",
         "node_type",
+        "origin",
+        "origin_reason",
         "status",
         "iteration",
         "title",
@@ -154,7 +156,11 @@ def _compact_node(value: Any, *, include_change: bool = False) -> dict[str, Any]
             if key in trace
         }
         result["memory_graph_trace"]["edges"] = [
-            {key: _short(edge[key], 320) for key in ("relation", "edge_type", "reason", "direction") if key in edge}
+            {
+                key: _short(edge[key], 520)
+                for key in ("source", "target", "relation", "edge_type", "reason", "direction", "target_change")
+                if key in edge
+            }
             for edge in trace.get("edges", [])[:4]
         ]
     return result
@@ -377,7 +383,7 @@ def _compact_state(value: Any) -> dict[str, Any]:
                 else _short(profile[key], 900)
             )
             for key in profile
-            if key in {"nodes", "edges", "families", "summary", "recent", "card_count", "decisions", "method_families", "linked_card_count"}
+            if key in {"directed", "nodes", "edges", "families", "summary", "recent", "edge_types", "card_count", "decisions", "method_families", "linked_card_count"}
         }
     return result
 

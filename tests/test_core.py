@@ -2050,9 +2050,28 @@ def test_memory_graph_links_related_cards_and_exposes_profile(tmp_path: Path) ->
     assert all(edge["source"] != edge["target"] for edge in edges)
     results = memory.search("task", "word reference")
     assert results and results[0]["variant_id"] == "v1"
+    assert results[0]["memory_graph_trace"]["card_id"] == results[0]["card_id"]
+    assert any(
+        edge["relation"] == "follows"
+        and edge["direction"] == "descendant"
+        for edge in results[0]["memory_graph_trace"]["edges"]
+    )
     connected = [row for row in results if row.get("retrieval_source") == "memory_graph"]
     assert connected
     assert connected[0]["memory_graph_trace"]["edges"][0]["relation"] == "follows"
+    fallback = memory.search("task", "unseen vocabulary")
+    assert fallback and any(
+        row["retrieval_source"] == "memory_graph_seed" for row in fallback
+    )
+    anchored = memory.search(
+        "task", "unseen vocabulary", seed_variant_ids=["v2"]
+    )
+    assert anchored and anchored[0]["variant_id"] == "v2"
+    assert anchored[0]["retrieval_source"] == "graph_anchor"
+    assert any(
+        edge["relation"] == "follows" and edge["direction"] == "ancestor"
+        for edge in anchored[0]["memory_graph_trace"]["edges"]
+    )
 
 
 def test_experiment_memory_returns_relevant_cards(tmp_path: Path) -> None:
