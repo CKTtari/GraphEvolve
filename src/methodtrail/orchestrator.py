@@ -212,6 +212,24 @@ class MethodTrail:
         if self.session is None:
             self.session = self.projects.start_session(self.project, self.session_id)
             self.session_id = self.session.session_id
+            # Publish a usable monitor as soon as the session exists. The
+            # first LLM call may take several minutes before an iteration
+            # result is available, but the dashboard should be reachable
+            # during that interval as well.
+            try:
+                dashboard_path = (
+                    self.projects.project_path(self.project)
+                    / "sessions"
+                    / self.session.session_id
+                    / "dashboard.html"
+                )
+                self.export_dashboard(
+                    dashboard_path,
+                    project_id=self.project.project_id,
+                    session_id=self.session.session_id,
+                )
+            except Exception as exc:  # noqa: BLE001 - monitoring must not stop research.
+                logger.debug("initial dashboard export failed: %s", exc)
 
     @staticmethod
     def _budget_reserve(contract: TaskContract, remaining_seconds: int) -> int:

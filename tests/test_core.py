@@ -1800,6 +1800,34 @@ def test_dashboard_shows_brand_score_series_and_candidate_comparison(tmp_path: P
     assert "__BRAND__" not in html
 
 
+def test_dashboard_is_available_immediately_after_session_creation(tmp_path: Path) -> None:
+    template = tmp_path / "template"
+    template.mkdir()
+    contract = TaskContract(
+        task_id="initial-dashboard-toy",
+        description="toy",
+        workspace_template=str(template),
+        allowed_data_paths=[],
+        solution_entrypoint="solution.py",
+        run_command=[sys.executable, "solution.py"],
+        metric_name="score",
+        required_outputs=["predictions.csv"],
+        protected_paths=[],
+    )
+    trail = MethodTrail(tmp_path / "project", FakeLLM(), project_id="initial-dashboard")
+    trail._ensure_project_session(contract)
+
+    assert trail.project is not None and trail.session is not None
+    dashboard = (
+        trail.projects.project_path(trail.project)
+        / "sessions"
+        / trail.session.session_id
+        / "dashboard.html"
+    )
+    assert dashboard.exists()
+    assert "GraphEvolve v" in dashboard.read_text(encoding="utf-8")
+
+
 def test_orchestrator_repairs_a_failed_generated_program(tmp_path: Path) -> None:
     template = tmp_path / "template"
     template.mkdir()
