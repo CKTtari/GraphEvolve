@@ -151,7 +151,7 @@ class ExperimentPathGraph:
             # executable node for an identical method; the existing node stays
             # available as history and can be revisited when new evidence
             # changes its priority.
-            if any(
+            if not change.repeat_reason and any(
                 data.get("method_signature") == signature
                 and data.get("node_type") in {"proposal", "outcome"}
                 and (
@@ -363,6 +363,7 @@ class ExperimentPathGraph:
             "changed_factors": method.get("changed_factors", []),
             "method_components": method.get("components", {}),
             "evidence_parent_ids": raw.get("evidence_parent_ids", data.get("evidence_parent_ids", [])),
+            "repeat_reason": raw.get("repeat_reason"),
             "relation_warning": data.get("relation_warning", raw.get("relation_warning")),
         }
 
@@ -451,10 +452,26 @@ class ExperimentPathGraph:
     def frontier_changes(self, limit: int = 50) -> list[tuple[str, ChangeRequestArtifact]]:
         """Rehydrate unexecuted method nodes for a later path comparison."""
 
+        measured_signatures = {
+            str(data.get("method_signature"))
+            for _, data in self.graph.nodes(data=True)
+            if data.get("node_type") == "outcome" and data.get("method_signature")
+        }
         result: list[tuple[str, ChangeRequestArtifact]] = []
         for row in self.candidate_frontier(limit=limit):
             raw_change = row.get("change_request")
             if not raw_change:
+                continue
+            change = ChangeRequestArtifact.model_validate(raw_change)
+            # A pending node may be revisited after new evidence, but an exact
+            # measured method is not a new experiment. Require the agent to
+            # declare what changed before putting it back in the executable
+            # frontier. This keeps historical alternatives visible without
+            # spending rounds on an identical rerun.
+            if (
+                method_signature(change) in measured_signatures
+                and not change.repeat_reason
+            ):
                 continue
             parent_ids = [
                 parent_id
@@ -463,7 +480,7 @@ class ExperimentPathGraph:
                 in {"candidate", "lineage"}
             ]
             parent_id = parent_ids[0] if parent_ids else None
-            change = ChangeRequestArtifact.model_validate(raw_change).model_copy(
+            change = change.model_copy(
                 update={"parent_variant_id": parent_id}
             )
             result.append((str(row["node_id"]), change))
@@ -1466,71 +1483,29 @@ def candidate_coverage_gap(
     changes: Iterable[ChangeRequestArtifact],
     *,
     initial: bool,
-    recent_outcomes: Iterable[dict[str, Any]] | None = None,
 ) -> str | None:
-    """Return a missing-search-direction warning before ranking candidates.
-
-    This is intentionally task agnostic. It does not name a predictor or a
-    feature type; it notices either an initial batch that is too narrow, or a
-    later batch that repeats recent factors after non-improving outcomes. The
-    orchestrator gives the same research question one bounded revision pass
-    instead of silently accepting a narrow candidate batch. Composition is a
-    possible direction, not a required one.
-    """
+    """Return a task-agnostic warning when the initial batch is too narrow."""
 
     items = list(changes)
-    if initial:
-        if len(items) <= 1:
-            return None
-        families = {
-            change.method.family
-            for change in items
-            if change.method.family and change.method.family != "unspecified"
-        }
-        component_profiles = {
-            json.dumps(change.method.components, ensure_ascii=False, sort_keys=True)
-            for change in items
-            if change.method.components
-        }
-        if len(families) >= 2 or len(component_profiles) >= 2:
-            return None
-        return (
-            "The initial candidate batch is too narrow: it covers only one "
-            "method family or component profile. Add at least one distinct, "
-            "genuinely different executable direction tied to the same research question; "
-            "composition is optional and must be justified by the task evidence."
-        )
-
-    recent = list(recent_outcomes or [])
-    non_improving = [row for row in recent if row.get("improved") is False]
-    if len(non_improving) < 2:
+    if not initial or len(items) <= 1:
         return None
-    recent_factors = {
-        factor
-        for row in recent
-        for factor in (row.get("method") or {}).get("changed_factors", [])
-    }
-    recent_families = {
-        (row.get("method") or {}).get("family", "unspecified") for row in recent
-    }
-    has_orthogonal = any(
-        set(change.method.changed_factors) - recent_factors
-        or (
-            change.method.family not in recent_families
-            and change.method.family != "unspecified"
-        )
+    families = {
+        change.method.family
         for change in items
-    )
-    if has_orthogonal:
+        if change.method.family and change.method.family != "unspecified"
+    }
+    component_profiles = {
+        json.dumps(change.method.components, ensure_ascii=False, sort_keys=True)
+        for change in items
+        if change.method.components
+    }
+    if len(families) >= 2 or len(component_profiles) >= 2:
         return None
     return (
-        "The last measured candidates contain at least two non-improving outcomes "
-        "and the current batch is close to that recent region. Reconsider the batch "
-        "using the evidence: a local continuation, measured backtrack, orthogonal "
-        "direction, or another different direction may be useful, but do not add a "
-        "nominally new method only to satisfy "
-        "this warning. A repeatability check is valid when it changes the fold, seed, "
-        "convergence check, or validation protocol and names the unresolved cause."
+        "The initial candidate batch is too narrow: it covers only one "
+        "method family or component profile. Add at least one distinct, "
+        "genuinely different executable direction tied to the same research question; "
+        "composition is optional and must be justified by the task evidence."
     )
 
 

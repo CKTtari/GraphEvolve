@@ -143,6 +143,11 @@ Pass the variable name, model, and endpoint when starting a run:
 
     conda run -n methodtrail python -m methodtrail run --contract .\task_contract.json --project-root .\methodtrail_state --project-id demo-project --model your-model-name --api-key-env LLM_API_KEY --base-url https://your-openai-compatible-endpoint/v1 --remaining-seconds 3600 --max-iterations 20
 
+To start a fresh project while exposing measured results from a completed
+project as read-only evidence, add `--prior-project-id <completed-project>`.
+The prior project's code, graph edges, and variant IDs are not reused; the
+current project creates its own parent and evidence links.
+
 The CLI default is `DASHSCOPE_API_KEY` for backward compatibility; the
 benchmark and examples can use `LLM_API_KEY` explicitly. The endpoint and
 model are launch-time settings.
@@ -181,6 +186,11 @@ The workspace template contains public inputs only. A private evaluator can cont
 For a public task, use evaluation_command instead of the private-evaluator fields. Self-reported metrics are intended only for quick smoke tasks.
 
 `timeout_seconds` remains accepted for older task adapters but is no longer an implicit per-command kill switch. By default, a running experiment is checked every `execution_check_interval_seconds`; the execution monitor can request termination when logs or outputs show a real failure. Set `execution_hard_timeout_seconds` only when a task explicitly requires a single-run cap. The research session's total budget remains the outer deadline.
+
+The controller does not require a fixed number of candidates per round. It
+keeps distinct executable choices, and a measured method is not rerun from
+the pending frontier unless the proposal declares a new protocol or an
+unresolved repeatability reason in `repeat_reason`.
 
 ## Run and manage projects
 

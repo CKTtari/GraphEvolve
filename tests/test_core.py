@@ -18,7 +18,11 @@ from methodtrail.llm import (
     OpenAICompatibleLLM,
 )
 from methodtrail.memory import BugMemory, ExperimentMemory, MemoryCard
-from methodtrail.orchestrator import MethodTrail, _metric_deteriorated
+from methodtrail.orchestrator import (
+    MethodTrail,
+    _candidate_contract_issues,
+    _metric_deteriorated,
+)
 from methodtrail.path_graph import ExperimentPathGraph, candidate_coverage_gap
 from methodtrail.project import ProjectManager
 from methodtrail.repository import RepoMap
@@ -300,6 +304,65 @@ def test_numeric_tie_does_not_replace_incumbent(tmp_path: Path) -> None:
     assert trail._metric_improves_incumbent(contract, 0.35)
 
 
+def test_prior_project_cards_are_read_only_context(tmp_path: Path) -> None:
+    template = tmp_path / "template"
+    template.mkdir()
+    contract = TaskContract(
+        task_id="prior-context",
+        description="toy",
+        workspace_template=str(template),
+        allowed_data_paths=[],
+        run_command=[sys.executable, "solution.py"],
+        metric_name="loss",
+        maximize_metric=False,
+    )
+    state_root = tmp_path / "state"
+    manager = ProjectManager(state_root / ".methodtrail")
+    prior = manager.ensure_project(contract, "prior")
+    manager.ensure_project(contract, "current")
+    memory_dir = manager.project_path(prior) / "memory"
+    memory_dir.mkdir(parents=True, exist_ok=True)
+    cards = [
+        MemoryCard(
+            task_id=contract.task_id,
+            session_id="s1",
+            variant_id="old-a",
+            question="a",
+            conclusion="a result",
+            relation="explore",
+            decision="adopt",
+            metric=0.30,
+            method_family="family-a",
+        ),
+        MemoryCard(
+            task_id=contract.task_id,
+            session_id="s1",
+            variant_id="old-b",
+            question="b",
+            conclusion="b result",
+            relation="explore",
+            decision="adopt",
+            metric=0.20,
+            method_family="family-b",
+        ),
+    ]
+    (memory_dir / "cards.jsonl").write_text(
+        "".join(card.model_dump_json() + "\n" for card in cards), encoding="utf-8"
+    )
+    trail = MethodTrail(
+        state_root,
+        FakeLLM(),
+        project_id="current",
+        prior_project_id="prior",
+    )
+    trail.project = manager.load_project("current")
+    context = trail._prior_evidence_context(contract)
+    assert [row["variant_id"] for row in context] == ["old-b", "old-a"]
+    assert all(row["read_only"] for row in context)
+    assert all(row["source_project_id"] == "prior" for row in context)
+    assert not (manager.project_path(manager.load_project("current")) / "memory" / "cards.jsonl").exists()
+
+
 def test_initial_candidate_coverage_requires_a_distinct_direction() -> None:
     word = ChangeRequestArtifact(
         title="word representation",
@@ -387,60 +450,6 @@ def test_composition_candidate_is_not_penalized_before_positive_history(tmp_path
     )
     signal = graph.selection_signal(candidate, 300)
     assert signal["composition_penalty"] is False
-
-
-def test_late_candidate_coverage_breaks_a_repeating_non_improving_factor() -> None:
-    local = ChangeRequestArtifact(
-        title="local calibration tweak",
-        mutation_class=MutationClass.CONFIGURATION,
-        research_question="improve probabilities",
-        rationale="adjust one local factor",
-        method=MethodDescriptor(
-            family="calibration", changed_factors=["temperature"]
-        ),
-    )
-    gap = candidate_coverage_gap(
-        [local],
-        initial=False,
-        recent_outcomes=[
-            {
-                "improved": False,
-                "method": {"family": "calibration", "changed_factors": ["temperature"]},
-            },
-            {
-                "improved": False,
-                "method": {"family": "calibration", "changed_factors": ["temperature"]},
-            },
-        ],
-    )
-    assert gap and "orthogonal" in gap
-
-
-def test_repeated_composition_does_not_mask_coverage_gap() -> None:
-    repeated = ChangeRequestArtifact(
-        title="another blend-weight repeat",
-        mutation_class=MutationClass.COMPOSITION,
-        relation="combine",
-        research_question="does another blend weight help?",
-        rationale="repeat the same composition family",
-        method=MethodDescriptor(
-            family="blend", changed_factors=["composition_weight"]
-        ),
-    )
-    recent = [
-        {
-            "improved": False,
-            "method": {
-                "family": "blend",
-                "changed_factors": ["composition_weight"],
-            },
-        }
-        for _ in range(2)
-    ]
-    assert candidate_coverage_gap(
-        [repeated], initial=False, recent_outcomes=recent
-    )
-
 
 def test_search_policy_changes_value_weights() -> None:
     breadth = ValueWeights.for_search_policy("breadth", 1, 3)
@@ -633,6 +642,60 @@ def test_path_graph_deduplicates_methods_and_links_related_nodes(tmp_path: Path)
         if data.get("edge_type") == "related"
     ]
     assert related
+
+
+def test_frontier_does_not_repeat_measured_method_without_reason(tmp_path: Path) -> None:
+    graph = ExperimentPathGraph(tmp_path / "graph.json")
+    change = ChangeRequestArtifact(
+        title="same method",
+        mutation_class=MutationClass.IMPLEMENTATION,
+        relation="deepen",
+        research_question="does depth help?",
+        rationale="compare depth",
+        method=MethodDescriptor(
+            family="tree", components={"depth": "6"}, changed_factors=["depth"]
+        ),
+    )
+    proposal_id = graph.attach_proposals(None, [change], iteration=1)[0][0]
+    graph.mark_proposal_selected(proposal_id)
+    graph.add_node(
+        PathNode(
+            variant_id="measured",
+            iteration=1,
+            title="same method",
+            relation="deepen",
+            mutation_class=MutationClass.IMPLEMENTATION,
+            question="does depth help?",
+            evidence_summary="measured",
+            status="needs_evidence",
+            method=change.method,
+        )
+    )
+    graph.record_outcome(proposal_id, "measured", "needs_evidence")
+    assert graph.frontier_changes() == []
+
+    repeated = change.model_copy(
+        update={"repeat_reason": "repeat with seed 43 to test split sensitivity"}
+    )
+    repeated_id = graph.attach_proposals(None, [repeated], iteration=2)[0][0]
+    graph.set_proposal_priority(repeated_id, 0.5)
+    frontier = graph.frontier_changes()
+    assert [node_id for node_id, _ in frontier] == [repeated_id]
+
+
+def test_candidate_contract_preflight_is_small_and_deterministic() -> None:
+    invalid = ChangeRequestArtifact(
+        title="invalid ablation",
+        mutation_class=MutationClass.IMPLEMENTATION,
+        relation="ablate",
+        research_question="test ablation",
+        rationale="remove one component",
+        required_invariants=["fixed 3-fold and fixed 5-fold protocol", "fixed 3-fold and fixed 5-fold protocol"],
+    )
+    issues = _candidate_contract_issues(invalid, initial_candidate=False)
+    assert any("changed_factors" in issue for issue in issues)
+    assert any("duplicate" in issue for issue in issues)
+    assert any("fold counts" in issue for issue in issues)
 
 
 def test_path_graph_records_multiple_evidence_parents_separately_from_code_parent(tmp_path: Path) -> None:

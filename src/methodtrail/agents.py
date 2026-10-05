@@ -101,6 +101,8 @@ def _compact_node(value: Any, *, include_change: bool = False) -> dict[str, Any]
         "changed_factors",
         "method_components",
         "retrieval_source",
+        "source_project_id",
+        "read_only",
         "relevance",
     ):
         if key in value and value[key] not in (None, "", [], {}):
@@ -135,6 +137,7 @@ def _compact_node(value: Any, *, include_change: bool = False) -> dict[str, Any]
                     "research_question",
                     "parent_variant_id",
                     "required_invariants",
+                    "repeat_reason",
                     "rationale",
                 )
                 if change.get(key) not in (None, "", [], {})
@@ -241,6 +244,7 @@ def _compact_candidate(value: Any) -> dict[str, Any]:
         "failure_risk",
         "parent_variant_id",
         "evidence_parent_ids",
+        "repeat_reason",
     ):
         if candidate.get(key) not in (None, "", [], {}):
             result[key] = _short(candidate[key], 420)
@@ -366,6 +370,10 @@ def _compact_state(value: Any) -> dict[str, Any]:
     result["memory_context"] = [
         _compact_node(item, include_change=False)
         for item in (state.get("memory_context") or [])[:8]
+    ]
+    result["prior_evidence_context"] = [
+        _compact_node(item, include_change=False)
+        for item in (state.get("prior_evidence_context") or [])[:6]
     ]
     result["portfolio_context"] = [
         {
@@ -502,6 +510,14 @@ promising local line, backtrack, or open a new direction; choose the balance fro
 mandatory novelty rule. A new label alone is not evidence, and a weaker exploratory result remains an archived
 stepping stone. Keep the best checkpoint available and state what observation would make you stay with or leave the
 current line."""
+        if state.prior_evidence_context:
+            instruction += """
+
+The context may contain prior_evidence_context from another completed project.
+Treat it as read-only comparative evidence, not as current-project graph state:
+do not reuse its IDs as code parents. Use it only to avoid forgetting a
+measured direction and decide whether the current question should test it again
+under the current task protocol."""
         user = _context(
             instruction,
             contract=contract,
@@ -532,8 +548,9 @@ handling. Include an integrated first candidate plus component-level candidates 
 If the candidate set contains multiple useful families or components, consider
 an explicit composition or fusion challenger, but do not assume that composition
 is always the right direction. Do not treat useful families as mutually
-exclusive without evidence. Aim for at least four distinct candidates when
-four executable directions are available; do not pad the list with duplicates
+exclusive without evidence. Return only as many candidates as add information;
+two to four is common, but one is acceptable when no other executable direction
+adds information. Do not pad the list with duplicates
 or cosmetic rewrites when the graph cannot support that breadth. Give substantive
 representation, model, objective, training, and composition alternatives
 priority over formatting-only changes when the output schema already works."""
@@ -543,7 +560,8 @@ priority over formatting-only changes when the output schema already works."""
  changes. Consider an unmeasured family, an explicit backtrack, or a controlled
 change when it answers a visible question; otherwise deepen a recent supported improvement. Keep an executable alternative in the frontier when
 the evidence leaves a distinct family or factor untested. Merge existing pending candidates with new
-proposals and keep the comparison set small, usually two to four distinct executable choices. Preserve a local refinement when it tests a concrete unresolved cause. A
+proposals and keep the comparison set small, usually two to four distinct executable choices; one is acceptable when
+no other choice adds information. Preserve a local refinement when it tests a concrete unresolved cause. A
 local calibration improvement does not make all other representation families
 ineligible."""
         )
@@ -574,8 +592,9 @@ small and executable; the controller will retain useful unselected candidates fo
 
 Expand the project method graph with a small set of executable method nodes. Return only
 methods that add a distinct implementation, configuration, composition, or
-recovery possibility. Usually two to four relevant choices are enough; do not
-pad the batch merely to reach a count, and do not repeat a method already present in
+recovery possibility. Usually two to four relevant choices are enough; one is
+acceptable when no other executable choice adds information; do not pad the
+batch merely to reach a count, and do not repeat a method already present in
 the supplied graph context. Each candidate must be tied to the current
 hypothesis and one graph relation. Separate configuration-only changes from
 composition, implementation, and recovery changes. For every candidate fill
@@ -589,14 +608,19 @@ graph as a coverage map: when a family already has repeated non-improving
 outcomes and no nearby positive evidence, consider an unmeasured family or
 state a genuinely new factor that answers a visible unresolved question. Do
 not spend a proposal slot on a
-reworded version of a measured method. Use the memory-graph summary when
+reworded version of a measured method. If you intentionally repeat a measured
+method, fill repeat_reason with the new seed, fold, protocol, or unresolved
+cause; without that reason the controller will leave the old result in history
+instead of executing it again. Use the memory-graph summary when
 deciding whether a direction is already sufficiently explored. The graph is
 directed: an edge points from an earlier method or candidate parent to the
 newer branch. If a poor result should be retested from an older measured
 version, set parent_variant_id to that existing outcome node ID from
 graph_context, where traversal is marked backtrack_ancestor; otherwise leave
 it null. This is a deliberate directed backtrack and must not point to a
-proposal node or invent an ID. You own the semantic relation field: declare
+proposal node or invent an ID. Any prior_evidence_context is read-only evidence
+from another project: it can suggest a direction, but its IDs cannot be used
+as parent_variant_id or evidence_parent_ids in this project. You own the semantic relation field: declare
 ablate only when the research question intentionally removes a named
 component; declare deepen, combine, or explore when that is the experiment's
 meaning. The graph may flag a mismatch between the relation and component map,
@@ -639,7 +663,8 @@ measured uncertainty it can resolve, its comparison protocol, and an explicit cl
 condition. Account for dataset and sampling differences when interpreting validation
 and independent-evaluation scores. When the comparison has answered its question,
 close that uncertainty and return to the available frontier. Do not select an index outside the
-supplied list.""",
+supplied list. If prior_evidence_context is present, use it as read-only evidence
+from another project; do not select a historical ID as a current parent.""",
             contract=contract,
             state=state,
             hypothesis=hypothesis,
@@ -1034,7 +1059,13 @@ def _context(
         packed = _shrink_strings(packed, limit=1400)
         serialized = json.dumps(packed, ensure_ascii=False, separators=(",", ":"))
     if len(serialized) > prose_limit:
-        for key in ("method_pool", "graph_context", "memory_context", "portfolio_context"):
+        for key in (
+            "method_pool",
+            "graph_context",
+            "memory_context",
+            "prior_evidence_context",
+            "portfolio_context",
+        ):
             if isinstance(packed.get("state"), dict) and isinstance(packed["state"].get(key), list):
                 packed["state"][key] = packed["state"][key][:8]
         serialized = json.dumps(packed, ensure_ascii=False, separators=(",", ":"))

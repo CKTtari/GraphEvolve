@@ -70,6 +70,14 @@ def main() -> None:
         default=None,
         help="project name; omit to use the task_id as the project name",
     )
+    run.add_argument(
+        "--prior-project-id",
+        default=None,
+        help=(
+            "optional completed project whose measured cards are exposed as "
+            "read-only evidence; its graph and code are not reused"
+        ),
+    )
 
     pause = commands.add_parser("pause", help="pause a session and keep its handoff")
     pause.add_argument("--project-root", required=True)
@@ -187,6 +195,7 @@ def main() -> None:
         llm,
         session_id=getattr(args, "session_id", None),
         project_id=getattr(args, "project_id", None),
+        prior_project_id=getattr(args, "prior_project_id", None),
     )
     if args.command == "export-trajectory":
         print(trail.export_trajectory(args.output))

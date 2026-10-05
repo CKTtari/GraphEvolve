@@ -168,6 +168,10 @@ MethodTrail separates a research project from its individual sessions and code v
 - A **run** is the measured execution performed inside that candidate worktree.
 - A **memory card** stores a reusable conclusion in append-only JSONL. A separate memory graph links cards by parent variant, method family, changed factors, and related tags; the experiment-path graph stores executable method relations.
 
+A fresh project may receive a completed project's cards as read-only prior
+evidence. This does not import code, graph edges, or variant IDs; all current
+parent and evidence links remain local to the new project.
+
 The Git commits, candidate metadata, session handoff, trajectory JSONL, memory cards, and memory graph are the replayable sources of truth. SQLite artifacts remain useful as a local audit/index layer, but the system can still inspect a project without querying a database.
 
 Pause writes the latest accepted version, metric, next question, workspace, and artifact references into `handoff.md`. Resume reopens the session and starts the next candidate from the project’s accepted revision. Rollback moves the project’s accepted-version pointer to any earlier adopted candidate; it does not erase later exploratory evidence.
@@ -356,11 +360,13 @@ The default calculation uses transparent unit weights. The LLM supplies the
 candidate's expected improvement and information value, while the program
 derives runtime and failure risk from the method graph and execution history.
 Stage coefficients are recorded in every candidate-priority artifact. After
-two plateau rounds, Reflection and Choose are instructed to include an
-orthogonal or directed-backtrack branch and to keep at most one local
-calibration/aggregation control. A renamed family with the same components
-does not satisfy that requirement. Any change to the scoring rule is itself a
-versioned harness change and is recorded in the project history.
+two plateau rounds, Reflection and Choose receive the plateau context and may
+continue a supported line, backtrack, or open another direction. The controller
+does not mandate a particular family or generate a second proposal batch merely
+to satisfy a coverage rule. A measured method is not re-executed from the
+pending frontier unless the proposal declares a new protocol or an explicit
+repeatability reason. Any change to the scoring rule is itself a versioned
+harness change and is recorded in the project history.
 
 The LLM sees program-sorted candidates. If it selects a lower-ranked path, it must record a concrete reason. Selected and deferred candidates both remain in the Decision Artifact.
 

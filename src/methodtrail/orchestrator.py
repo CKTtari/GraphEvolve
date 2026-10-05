@@ -159,6 +159,53 @@ def _failure_signature(run: RunArtifact) -> str:
     return re.sub(r"\s+", " ", cause).lower()[:500]
 
 
+def _candidate_contract_issues(
+    change: ChangeRequestArtifact, *, initial_candidate: bool
+) -> list[str]:
+    """Catch only obvious contract errors before creating a worktree.
+
+    Semantic questions such as whether a calibration comparison leaks labels
+    still belong to the implementation review. This small preflight prevents
+    an avoidable code-plan/execution loop for malformed declarations without
+    introducing another LLM role.
+    """
+
+    issues: list[str] = []
+    if not change.research_question.strip():
+        issues.append("research_question must state the experiment being tested")
+    if not change.rationale.strip():
+        issues.append("rationale must explain the intended change")
+    if change.relation == "ablate" and not change.method.changed_factors:
+        issues.append(
+            "relation=ablate requires changed_factors to name the component being removed"
+        )
+    if (
+        not initial_candidate
+        and change.method.family == "unspecified"
+        and not change.method.components
+        and not change.method.changed_factors
+    ):
+        issues.append(
+            "a child candidate must declare a method family, component, or changed factor"
+        )
+    invariants = [item.strip() for item in change.required_invariants if item.strip()]
+    if len({item.casefold() for item in invariants}) != len(invariants):
+        issues.append("required_invariants contains a duplicate declaration")
+    for invariant in invariants:
+        lower = invariant.casefold()
+        fold_values = set(re.findall(r"\b(\d+)\s*[- ]?fold\b", lower))
+        if len(fold_values) > 1 and not ("inner" in lower and "outer" in lower):
+            issues.append(
+                "one required_invariant declares multiple fold counts; choose one protocol or label inner/outer folds"
+            )
+        seed_values = set(re.findall(r"\bseed(?:\s*\+\s*1)?\s*(?:=|:)\s*(\d+)\b", lower))
+        if len(seed_values) > 1:
+            issues.append(
+                "one required_invariant declares multiple seeds; state the exact seed protocol"
+            )
+    return issues
+
+
 class MethodTrail:
     """Runs one serial experiment at a time and writes every fact into artifacts."""
 
@@ -168,6 +215,7 @@ class MethodTrail:
         llm: StructuredLLM,
         session_id: str | None = None,
         project_id: str | None = None,
+        prior_project_id: str | None = None,
     ) -> None:
         self.root = Path(project_root).resolve()
         self.state_root = self.root / ".methodtrail"
@@ -182,6 +230,7 @@ class MethodTrail:
         self._research_budget_seconds: int | None = None
         self.session_id = session_id
         self.project_id = project_id
+        self.prior_project_id = prior_project_id
         self.project: ProjectRecord | None = None
         self.session: SessionRecord | None = None
         self.verifier = Verifier()
@@ -199,6 +248,71 @@ class MethodTrail:
         self.assessment_memory = AssessmentMemoryAgent(llm)
         self.assess = self.assessment_memory.assess_agent
         self.memory_agent = self.assessment_memory.memory_agent
+
+    def _prior_evidence_context(self, contract: TaskContract) -> list[dict[str, Any]]:
+        """Read a compact, immutable evidence summary from another project.
+
+        Prior projects are deliberately not loaded into the active graph or
+        repository. Their measured cards only help a fresh run avoid forgetting
+        a previously successful direction; parent and evidence IDs remain
+        local to the current project.
+        """
+
+        if not self.prior_project_id or self.project is None:
+            return []
+        if self.prior_project_id == self.project.project_id:
+            return []
+        try:
+            prior = self.projects.load_project(self.prior_project_id)
+        except FileNotFoundError:
+            return []
+        if prior.task_id != contract.task_id:
+            return []
+        cards_path = self.projects.project_path(prior) / "memory" / "cards.jsonl"
+        if not cards_path.exists():
+            return []
+        cards: list[MemoryCard] = []
+        for line in cards_path.read_text(encoding="utf-8").splitlines():
+            if not line.strip():
+                continue
+            try:
+                card = MemoryCard.model_validate_json(line)
+            except ValueError:
+                continue
+            if card.task_id == contract.task_id and card.metric is not None:
+                cards.append(card)
+        if not cards:
+            return []
+        ordered = sorted(
+            cards,
+            key=lambda card: (
+                card.metric if card.metric is not None else float("inf"),
+                -(card.iteration or 0),
+            )
+            if not contract.maximize_metric
+            else (
+                -(card.metric if card.metric is not None else float("-inf")),
+                -(card.iteration or 0),
+            ),
+        )
+        chosen: list[MemoryCard] = []
+        seen_families: set[str] = set()
+        for card in ordered:
+            family = card.method_family or "unspecified"
+            if family not in seen_families or len(chosen) < 2:
+                chosen.append(card)
+                seen_families.add(family)
+            if len(chosen) >= 6:
+                break
+        return [
+            {
+                **card.model_dump(mode="json"),
+                "retrieval_source": "prior_project",
+                "source_project_id": prior.project_id,
+                "read_only": True,
+            }
+            for card in chosen
+        ]
 
     def _ensure_project_session(self, contract: TaskContract) -> None:
         if self.project is None:
@@ -291,16 +405,12 @@ class MethodTrail:
         coverage_gap = candidate_coverage_gap(
             proposals.candidates,
             initial=state.iteration <= 1 and state.incumbent_metric is None,
-            recent_outcomes=self.graph.recent_outcome_summary(
-                limit=3, maximize_metric=contract.maximize_metric
-            ),
         )
-        # A narrow initial batch merits one revision.  Once a project has a
-        # measured frontier, plateau feedback is advisory: forcing a second
-        # proposal batch on every plateau both costs context time and turns a
-        # useful signal into a rigid exploration rule.  The LLM can decide
-        # whether to extend, revisit, or replace the current line.
-        if coverage_gap and state.plateau_rounds < 2:
+        # Only a genuinely narrow initial batch gets one revision. Once a
+        # measured frontier exists, the LLM decides whether to extend,
+        # revisit, or replace the current line; automatically generating a
+        # second batch is expensive and over-specifies exploration.
+        if coverage_gap and state.iteration <= 1:
             # One bounded revision pass prevents a narrow initial proposal set
             # from becoming the entire search space.  It keeps the same
             # hypothesis and does not invent a task-specific predictor.
@@ -453,6 +563,47 @@ class MethodTrail:
             [proposal_id, priority_id],
         )
         change_id = self.store.put("change_request", change, [selection_id])
+
+        preflight_issues = _candidate_contract_issues(
+            change,
+            initial_candidate=not bool(change.parent_variant_id or code_parent_variant_id),
+        )
+        if preflight_issues:
+            feedback = (
+                "The selected candidate failed the deterministic preflight. "
+                "Keep the research question and intended comparison unchanged, "
+                "then revise only these declarations before editing:\n- "
+                + "\n- ".join(preflight_issues)
+            )
+            self.graph.mark_proposal_replan_rejected(
+                proposal_node_id,
+                feedback,
+                preflight_issues,
+            )
+            preflight_id = self.store.put(
+                "candidate_contract_preflight",
+                {"passed": False, "issues": preflight_issues},
+                [change_id],
+            )
+            result = IterationResult(
+                iteration=state.iteration,
+                workspace=Path(self.project.repository),
+                change=change,
+                run=None,
+                assessment=None,
+                next_hypothesis=feedback,
+                artifact_ids={
+                    "state": state_id,
+                    "hypothesis": hypothesis_id,
+                    "change": change_id,
+                    "preflight": preflight_id,
+                },
+                hypothesis=hypothesis,
+                resume_mode="replan",
+                completed_research=False,
+            )
+            self._write_handoff(result)
+            return result
 
         candidate = self.projects.create_candidate(
             self.project,
@@ -1940,17 +2091,17 @@ class MethodTrail:
             ],
             graph_context=self.graph.context_for(parent_variant_id, query),
             path_hints=self.graph.expansion_hints(parent_variant_id),
-            portfolio_context=[
-                profile.model_dump(mode="json")
-                for profile in self.portfolio.pareto(
-                    maximize_metric=contract.maximize_metric
-                )
-            ],
+            # Portfolio.json remains available for reports and compatibility,
+            # but its multi-objective Pareto summary is not a separate decision
+            # signal. The graph and cards already carry the evidence the agents
+            # need, so keep this prompt channel empty to reduce noise.
+            portfolio_context=[],
             memory_context=self.experiment_memory.search(
                 contract.task_id,
                 query,
                 seed_variant_ids=[parent_variant_id] if parent_variant_id else None,
             ),
+            prior_evidence_context=self._prior_evidence_context(contract),
             method_pool=self.graph.method_pool(limit=60),
             memory_graph_context=self.experiment_memory.graph_profile(contract.task_id),
         )

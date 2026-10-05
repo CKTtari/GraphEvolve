@@ -142,6 +142,10 @@ class ResearchState(BaseModel):
     path_hints: list[dict[str, Any]] = Field(default_factory=list)
     portfolio_context: list[dict[str, Any]] = Field(default_factory=list)
     memory_context: list[dict[str, Any]] = Field(default_factory=list)
+    # Optional read-only evidence imported from another completed project. The
+    # IDs in this list must never be used as code parents or current-project
+    # graph edges.
+    prior_evidence_context: list[dict[str, Any]] = Field(default_factory=list)
     method_pool: list[dict[str, Any]] = Field(default_factory=list)
     memory_graph_context: dict[str, Any] = Field(default_factory=dict)
 
@@ -168,6 +172,10 @@ class ChangeRequestArtifact(BaseModel):
     evidence_parent_ids: list[str] = Field(default_factory=list)
     allowed_files: list[str] = Field(default_factory=list)
     required_invariants: list[str] = Field(default_factory=list)
+    # A measured method is not re-run merely because it remains on the
+    # frontier. This is required only for an intentional repeat with a new
+    # seed, fold, or other declared protocol change.
+    repeat_reason: str | None = None
     expected_gain: float = Field(default=0.0, ge=0.0)
     information_gain: float = Field(default=0.0, ge=0.0)
     estimated_seconds: int = Field(default=60, ge=1)
