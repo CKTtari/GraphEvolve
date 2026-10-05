@@ -25,7 +25,12 @@ from .agents import (
 from .artifacts import ArtifactStore
 from .dashboard import write_dashboard
 from .execution import Executor, Verifier
-from .llm import LLMDeadlineExceeded, LLMOutputValidationError, StructuredLLM
+from .llm import (
+    LLMDeadlineExceeded,
+    LLMOutputValidationError,
+    LLMRequestTimeout,
+    StructuredLLM,
+)
 from .memory import BugMemory, BugRecord, ExperimentMemory, MemoryCard
 from .path_graph import ExperimentPathGraph, candidate_coverage_gap
 from .portfolio import PortfolioManager, VariantProfile
@@ -1188,6 +1193,7 @@ class MethodTrail:
         results: list[IterationResult] = []
         completed_rounds = 0
         consecutive_replans = 0
+        consecutive_llm_timeouts = 0
         plateau_rounds = (
             self.session.consecutive_non_improving if self.session is not None else 0
         )
@@ -1239,6 +1245,50 @@ class MethodTrail:
                         },
                     )
                 break
+            except LLMRequestTimeout as exc:
+                elapsed = max(1, int(time.monotonic() - iteration_started))
+                remaining_seconds = max(0, remaining_seconds - elapsed)
+                consecutive_llm_timeouts += 1
+                if self.project is not None and self.session is not None:
+                    self.projects.append_event(
+                        self.project,
+                        self.session.session_id,
+                        "llm_request_timeout",
+                        {
+                            "iteration": completed_rounds + 1,
+                            "elapsed_seconds": elapsed,
+                            "remaining_seconds": remaining_seconds,
+                            "consecutive_timeouts": consecutive_llm_timeouts,
+                            "reason": str(exc),
+                        },
+                    )
+                # A provider stall must not consume a research round or trap
+                # the controller in the same request forever. Give one fresh
+                # attempt a chance to continue with the same evidence, then
+                # stop cleanly if the provider remains unavailable.
+                if (
+                    consecutive_llm_timeouts >= 2
+                    or remaining_seconds <= self._budget_reserve(contract, remaining_seconds)
+                ):
+                    if self.project is not None and self.session is not None:
+                        self.projects.append_event(
+                            self.project,
+                            self.session.session_id,
+                            "research_stop",
+                            {
+                                "reason": "repeated LLM request timeouts",
+                                "completed_rounds": completed_rounds,
+                            },
+                        )
+                    break
+                trigger = (
+                    "The previous provider request timed out before returning a typed artifact. "
+                    "Keep the research question and use the existing graph evidence; retry with a "
+                    "compact, executable decision."
+                )
+                constraint_feedback = None
+                pending_hypothesis = None
+                continue
             except NoExecutableCandidate as exc:
                 if self.project is not None and self.session is not None:
                     self.projects.append_event(
@@ -1274,6 +1324,7 @@ class MethodTrail:
                         logger.debug("interrupted dashboard export failed: %s", dashboard_error)
                 raise
             results.append(result)
+            consecutive_llm_timeouts = 0
             # The budget covers the complete research turn, including LLM
             # planning, code editing and execution—not only the Python process.
             elapsed = max(1, int(time.monotonic() - iteration_started))

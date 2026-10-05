@@ -11,7 +11,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Protocol, TypeVar
 
-from openai import OpenAI
+from openai import APITimeoutError, OpenAI
 from pydantic import BaseModel
 
 T = TypeVar("T", bound=BaseModel)
@@ -19,6 +19,10 @@ T = TypeVar("T", bound=BaseModel)
 
 class LLMDeadlineExceeded(RuntimeError):
     """The shared research deadline expired before an LLM artifact was returned."""
+
+
+class LLMRequestTimeout(RuntimeError):
+    """One provider request exceeded its local timeout before the research deadline."""
 
 
 class LLMOutputValidationError(RuntimeError):
@@ -36,6 +40,7 @@ class OpenAICompatibleLLM:
     # implementation review without forcing test doubles or lightweight local
     # providers to implement another response type.
     supports_implementation_review = True
+    default_request_timeout_seconds = 300.0
 
     def __init__(
         self,
@@ -43,6 +48,7 @@ class OpenAICompatibleLLM:
         api_key_env: str = "DASHSCOPE_API_KEY",
         base_url: str | None = None,
         log_path: str | Path | None = None,
+        request_timeout_seconds: float = default_request_timeout_seconds,
     ) -> None:
         api_key = os.environ.get(api_key_env)
         if not api_key:
@@ -50,6 +56,9 @@ class OpenAICompatibleLLM:
         self.model = model
         self.log_path = Path(log_path) if log_path else None
         self.deadline: float | None = None
+        if request_timeout_seconds <= 0:
+            raise ValueError("request_timeout_seconds must be positive")
+        self.request_timeout_seconds = float(request_timeout_seconds)
         if self.log_path:
             self.log_path.parent.mkdir(parents=True, exist_ok=True)
         self.client = OpenAI(
@@ -83,6 +92,9 @@ class OpenAICompatibleLLM:
         )
         correction = ""
         previous_content = ""
+        request_timeout_seconds = getattr(
+            self, "request_timeout_seconds", self.default_request_timeout_seconds
+        )
         for attempt in range(3):
             call_id = uuid.uuid4().hex
             started = time.perf_counter()
@@ -106,7 +118,11 @@ class OpenAICompatibleLLM:
                     remaining = self.deadline - time.monotonic()
                     if remaining <= 0:
                         raise TimeoutError("research budget exhausted before LLM request")
-                    request_kwargs["timeout"] = max(1.0, remaining)
+                    request_kwargs["timeout"] = max(
+                        1.0, min(remaining, request_timeout_seconds)
+                    )
+                else:
+                    request_kwargs["timeout"] = request_timeout_seconds
                 response = self.client.chat.completions.create(
                     **request_kwargs,
                 )
@@ -122,11 +138,38 @@ class OpenAICompatibleLLM:
                     error="LLMDeadlineExceeded: research budget exhausted",
                 )
                 raise
+            except (APITimeoutError, TimeoutError) as exc:
+                if self.deadline is not None and time.monotonic() >= self.deadline:
+                    deadline_error = LLMDeadlineExceeded(
+                        "research budget exhausted during LLM request"
+                    )
+                    self._log_call(
+                        call_id,
+                        response_model,
+                        system,
+                        request_user,
+                        None,
+                        started,
+                        error=f"LLMDeadlineExceeded: {deadline_error}",
+                    )
+                    raise deadline_error from exc
+                timeout_error = LLMRequestTimeout(
+                    f"LLM request timed out after {request_timeout_seconds:.1f} seconds"
+                )
+                self._log_call(
+                    call_id,
+                    response_model,
+                    system,
+                    request_user,
+                    None,
+                    started,
+                    error=f"LLMRequestTimeout: {timeout_error}",
+                )
+                raise timeout_error from exc
             except Exception as exc:  # API errors remain visible to recovery.
-                # The request timeout is set to the remaining research budget.
-                # If the gateway reports a timeout after that deadline, preserve
-                # the semantic budget signal instead of wrapping it as a generic
-                # API failure that can escape the research loop.
+                # If the gateway reports a timeout after the shared deadline,
+                # preserve the semantic budget signal instead of wrapping it as
+                # a generic API failure that can escape the research loop.
                 if self.deadline is not None and time.monotonic() >= self.deadline:
                     deadline_error = LLMDeadlineExceeded(
                         "research budget exhausted during LLM request"

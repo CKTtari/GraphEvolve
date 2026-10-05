@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import sys
+import time
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -13,6 +14,7 @@ from methodtrail.execution import Executor, Verifier
 from methodtrail.llm import (
     LLMDeadlineExceeded,
     LLMOutputValidationError,
+    LLMRequestTimeout,
     OpenAICompatibleLLM,
 )
 from methodtrail.memory import BugMemory, ExperimentMemory, MemoryCard
@@ -205,6 +207,22 @@ def test_schema_correction_receives_previous_invalid_patch() -> None:
     assert llm.complete("system", "original task", CodePlanArtifact).edits[0].symbol is None
     assert requests[1]["messages"][2] == {"role": "assistant", "content": bad}
     assert "symbol=null" in requests[1]["messages"][3]["content"]
+
+
+def test_llm_request_timeout_is_bounded_before_research_deadline() -> None:
+    requests = []
+
+    def create(**kwargs):
+        requests.append(kwargs)
+        raise TimeoutError("provider stalled")
+
+    llm = OpenAICompatibleLLM.__new__(OpenAICompatibleLLM)
+    llm.model, llm.deadline, llm.log_path = "test", time.monotonic() + 3600, None
+    llm.request_timeout_seconds = 300.0
+    llm.client = SimpleNamespace(chat=SimpleNamespace(completions=SimpleNamespace(create=create)))
+    with pytest.raises(LLMRequestTimeout):
+        llm.complete("system", "request", CodePlanArtifact)
+    assert requests[0]["timeout"] == 300.0
 
 
 def test_artifact_store_round_trip(tmp_path: Path) -> None:

@@ -483,8 +483,9 @@ class ReflectionAgent:
         else:
             instruction = """Refine the current observation into one research question. State what evidence would answer it,
 how to compare alternatives, and what conditions lead to adoption or fallback. Later rounds should make changes more
-evidence-driven and attributable than the initial design. Do not let a local calibration or implementation gain erase
-an unmeasured complementary representation or composition. Once the independent evaluator and execution checks have
+evidence-driven and attributable than the initial design. Preserve an unmeasured alternative when it answers a concrete
+question, but do not interrupt a supported local line merely because another family has not been tried. Once the
+independent evaluator and execution checks have
 verified the interface and output invariants, further formatting, warning-reporting, or numerically equivalent hygiene
 changes belong to technical maintenance unless recorded evidence identifies an unresolved uncertainty that could change
 the research conclusion. Prefer a substantive predictive or validation question over rechecking already satisfied
@@ -539,10 +540,10 @@ priority over formatting-only changes when the output schema already works."""
             if initial
             else
             """This is a refinement round. Use the graph evidence to focus on a small set of high-value, attributable
- changes. Prefer an unmeasured family, an explicit backtrack, or a controlled
-change that answers a visible question. Keep an executable alternative in the frontier when
+ changes. Consider an unmeasured family, an explicit backtrack, or a controlled
+change when it answers a visible question; otherwise deepen a recent supported improvement. Keep an executable alternative in the frontier when
 the evidence leaves a distinct family or factor untested. Merge existing pending candidates with new
-proposals and aim to rank at least four distinct executable choices when available. Preserve a local refinement when it tests a concrete unresolved cause. A
+proposals and keep the comparison set small, usually two to four distinct executable choices. Preserve a local refinement when it tests a concrete unresolved cause. A
 local calibration improvement does not make all other representation families
 ineligible."""
         )
@@ -585,8 +586,9 @@ path priority, and keep unselected nodes in the method pool. The current task
 may start with an empty method graph, so derive the first methods from the task
 and data contract rather than assuming a supplied predictor. Treat the method
 graph as a coverage map: when a family already has repeated non-improving
-outcomes, prefer an unmeasured family or state a genuinely new factor that
-answers a visible unresolved question. Do not spend a proposal slot on a
+outcomes and no nearby positive evidence, consider an unmeasured family or
+state a genuinely new factor that answers a visible unresolved question. Do
+not spend a proposal slot on a
 reworded version of a measured method. Use the memory-graph summary when
 deciding whether a direction is already sufficiently explored. The graph is
 directed: an edge points from an earlier method or candidate parent to the
@@ -678,7 +680,11 @@ function/class name when one complete symbol must change. Use rewrite only when 
 genuinely needs a new complete implementation and this is the initial root candidate. Child candidates and all
 recovery steps must use replace or replace_symbol; the workspace rejects whole-file rewrites for them. Never use create for an existing file and never append a
 second program below an existing main guard. Do not edit protected or data files. Include the required solution
-entrypoint and keep the change focused on the research question. Treat every
+entrypoint and keep the change focused on the research question. Before editing,
+reconcile protocol details stated in the ChangeRequest, including fold count,
+seed, n-gram range, calibration, and metric conventions. If two declarations
+conflict, do not silently choose one: surface the exact conflict in the plan
+and invariant_checks so the candidate can be replanned. Treat every
 required_invariant in the ChangeRequest as an acceptance check: explain in the
     plan how the edit satisfies it, and list a concrete check for each one in
     invariant_checks. For an independently evaluated task, implement only the
