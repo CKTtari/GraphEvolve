@@ -1332,22 +1332,49 @@ class MethodTrail:
     ) -> list[IterationResult]:
         """Run serial iterations until a stopping decision, budget exhaustion, or iteration limit."""
 
+        self._ensure_project_session(contract)
+        assert self.project is not None and self.session is not None
+        history = self.projects.events(self.project, self.session.session_id, limit=100000)
+        completed_rounds = sum(
+            event["kind"] == "iteration_finished"
+            and event["payload"].get("completed_research", True)
+            for event in history
+        )
+        consecutive_replans = 0
+        for event in reversed(history):
+            if event["kind"] == "technical_attempt" and event["payload"].get("decision") == "replan":
+                consecutive_replans += 1
+            elif event["kind"] == "iteration_finished":
+                break
+        last_event = next(
+            (
+                event for event in reversed(history)
+                if event["kind"] in {"technical_attempt", "iteration_finished"}
+            ),
+            None,
+        )
+        resuming_replan = bool(
+            last_event
+            and last_event["kind"] == "technical_attempt"
+            and last_event["payload"].get("decision") == "replan"
+        )
         self._research_budget_seconds = total_seconds
         set_deadline = getattr(self.question_agent.llm, "set_deadline", None)
         if callable(set_deadline):
             set_deadline(time.monotonic() + total_seconds)
         remaining_seconds = total_seconds
-        trigger: str | None = None
-        constraint_feedback: str | None = None
+        trigger: str | None = self.session.next_question if history else None
+        constraint_feedback: str | None = trigger if resuming_replan else None
         pending_hypothesis: HypothesisArtifact | None = None
+        if resuming_replan:
+            hypothesis_id = last_event["payload"].get("artifact_ids", {}).get("hypothesis")
+            saved = self.store.get(hypothesis_id) if hypothesis_id else None
+            if saved is not None:
+                pending_hypothesis = HypothesisArtifact.model_validate(saved["payload"])
         current_parent = parent_variant_id
         results: list[IterationResult] = []
-        completed_rounds = 0
-        consecutive_replans = 0
         consecutive_llm_timeouts = 0
-        plateau_rounds = (
-            self.session.consecutive_non_improving if self.session is not None else 0
-        )
+        plateau_rounds = self.session.consecutive_non_improving
         consecutive_deteriorating = (
             self.session.consecutive_deteriorating if self.session is not None else 0
         )

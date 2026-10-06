@@ -1684,6 +1684,57 @@ def test_replanned_candidate_runs_in_same_research_round(tmp_path: Path) -> None
     assert trail.graph.graph.nodes[revision_edges[0][1]]["status"] == "adopted_outcome"
 
 
+def test_resumed_session_keeps_round_limit_and_replan_feedback(tmp_path: Path) -> None:
+    template = tmp_path / "template"
+    template.mkdir()
+    (template / "evaluate.py").write_text(
+        "import json\njson.dump({'score': 0.8}, open('metrics.json', 'w', encoding='utf-8'))\n",
+        encoding="utf-8",
+    )
+    contract = TaskContract(
+        task_id="resumed-replan-toy",
+        description="toy",
+        workspace_template=str(template),
+        allowed_data_paths=[],
+        solution_entrypoint="solution.py",
+        run_command=[sys.executable, "solution.py"],
+        evaluation_command=[sys.executable, "evaluate.py"],
+        metric_name="score",
+        required_outputs=["predictions.csv"],
+        timeout_seconds=30,
+        protected_paths=["evaluate.py", "metrics.json"],
+    )
+    llm = ReplanThenPassFakeLLM()
+    root = tmp_path / "project"
+    initial = MethodTrail(root, llm, project_id="resumed-replan-toy")
+    first = initial.run_iteration(contract, remaining_seconds=120)
+    assert first.resume_mode == "replan"
+    assert initial.session is not None
+    session_id = initial.session.session_id
+    # An interrupted process may have started the next attempt without finishing it.
+    assert initial.project is not None
+    initial.projects.append_event(
+        initial.project, session_id, "research_state", {"iteration": 1}
+    )
+
+    resumed = MethodTrail(
+        root, llm, session_id=session_id, project_id="resumed-replan-toy"
+    )
+    results = resumed.run_research(contract, total_seconds=120, max_iterations=1)
+    assert len(results) == 1
+    assert results[0].completed_research
+    assert results[0].iteration == 1
+    assert llm.proposal_calls == llm.review_calls == 2
+
+    already_complete = MethodTrail(
+        root, llm, session_id=session_id, project_id="resumed-replan-toy"
+    )
+    assert already_complete.run_research(
+        contract, total_seconds=120, max_iterations=1
+    ) == []
+    assert llm.proposal_calls == llm.review_calls == 2
+
+
 def test_repeated_unsatisfiable_candidate_stops_without_loop(tmp_path: Path) -> None:
     template = tmp_path / "template"
     template.mkdir()
