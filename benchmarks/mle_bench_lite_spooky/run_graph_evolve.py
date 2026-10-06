@@ -33,6 +33,11 @@ def main() -> None:
         default=None,
         help="resume an existing session instead of creating a new one",
     )
+    parser.add_argument(
+        "--prior-project-id",
+        default=None,
+        help="optional completed project whose cards are read as prior evidence",
+    )
     parser.add_argument("--state-dir", default="runs/graph_evolve_state")
     parser.add_argument("--dashboard-host", default="127.0.0.1")
     parser.add_argument("--dashboard-port", type=int, default=8767)
@@ -69,6 +74,7 @@ def main() -> None:
         llm,
         session_id=args.session_id,
         project_id=args.project_id,
+        prior_project_id=args.prior_project_id,
     )
     server = None
     if not args.no_dashboard_server:
