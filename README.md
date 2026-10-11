@@ -1,248 +1,150 @@
 # GraphEvolve
 
-GraphEvolve is an autonomous experiment system for tasks that need more than one coding attempt. An LLM chooses an experiment, edits the implementation, runs it, reads measured feedback, and decides what to try next.
+**v0.18 · Graph-guided autonomous experimentation**
 
-It is aimed at problems with a runnable evaluator but no fixed solution: model selection, feature work, training changes, ranking logic, and code repair can all become serial experiments with preserved code and results.
+GraphEvolve lets an LLM propose a research question, choose an experiment,
+write or patch its code, run an independent evaluator, and decide what to try
+next. It preserves measured results and the best valid code version.
+
+A task supplies data interfaces, permitted edits and evaluation rules. It does
+not supply a predictor or a fixed list of algorithms. The same research loop
+can work on text classification, tabular regression and other tasks with a
+runnable evaluator.
 
 ## Research loop
 
-Each research round follows one main path:
+    Task → Question → Method graph → Code → Execute → Record → Assess
 
-    Task -> Question -> Method graph -> Code -> Execute -> Record -> Assess
+- **Question Agent** turns the task and measured history into a testable question.
+- **Method Graph Agent** proposes or revisits candidates and chooses one experiment.
+- **Coding Agent** creates the first solution, then applies local edits to the selected parent.
+- **Implementation Review** checks the actual code changes against the selected experiment.
+- **Assessment-Memory Agent** records results and decides whether to adopt, verify or defer.
+- **Repair Agent** fixes execution and implementation failures inside the same research round.
 
-The controller keeps research decisions separate from technical execution.
+One selected experiment runs at a time. Repair and candidate replanning do not
+consume research rounds. The run ends at its total time budget, round limit,
+an explicit stop decision or the absence of an executable candidate. There is
+no automatic stop after a fixed number of non-improving rounds.
 
-- Question mode `new_question` turns the current observation into a testable question.
-- Question mode `conflict_refinement` turns valid but unclear results into an ablation, comparison, or segmented check.
-- Method Graph expands the project-wide method pool, connects new nodes to related history, and selects one path.
-- Coding writes a constrained patch; an independent implementation review checks the realized diff against the selected question and required invariants before execution.
-- Assessment-Memory records valid evidence and updates node status and path priority.
-- Repair handles technical failures inside the same research round and never changes the research question by itself.
+## Two directed graphs
 
-The LLM proposes experiments and edits. GraphEvolve ranks candidate paths, applies permitted edits, runs commands, reads evaluator output, and manages versions. The evaluator supplies the metric used to keep or reject a candidate.
+The **method graph** contains pending candidates and measured outcomes. Edges
+record code lineage, candidate execution, explicit evidence sources and sparse
+related-method links. Stable method signatures help avoid duplicate trials.
 
-### Graph-organized experiment memory
+The **experience graph** connects experiment cards through parent versions,
+explicit evidence references and relevant earlier conclusions. Retrieval follows
+directed ancestors and nearby branches and reports the traversed edges to the
+agents. Context is bounded instead of sending the entire experiment database.
 
-Each experiment declares a compact method description: method family, changed components, changed factors, and target scope. Before one candidate is executed, every proposed candidate is attached as a branch from the active version. The method graph tracks measured outcomes by family, gives an unmeasured family a small information preference, and lowers the priority of a family with repeated non-improvements. After repeated non-improvement it also penalizes candidates that only repeat the recent factors, while preserving information value for an unseen composition or orthogonal direction. A candidate must also fit the remaining runtime plus a finalization reserve before it can be selected.
+A candidate can choose an earlier measured version as its code parent and
+branch from it. Failed paths remain available as evidence. Graph priorities
+combine LLM estimates with measured gain, cost and risk; the LLM makes the
+final choice from a compact set of alternatives.
 
-The initial proposal batch has one generic coverage guard: when it contains only
-one method family or component profile, the controller gives the same hypothesis
-one bounded revision pass to add a distinct executable direction. Composition is
-one possible direction, not a required predictor. The guard does not name a
-benchmark model or force a fixed candidate count.
+## Code and evaluation
 
-After execution, the branch is linked to its outcome. Measured facts, reusable conclusions, applicable conditions, and failures are retained separately. Later iterations retrieve a directed evidence pack rather than a flat recent log:
+Existing code is changed through exact text or symbol edits. Syntax, imports,
+task interfaces and implementation review are checked before full execution.
+Review feedback can request a code repair or a revision of an infeasible
+candidate declaration. Technical failures are kept separately from measured
+research conclusions.
 
-- **path history** explains how the current method was reached;
-- **matched alternatives** expose sibling branches that isolate a related change;
-- **candidate frontier** preserves unselected or deferred branches that may become useful after new evidence arrives.
+Candidates use isolated Git worktrees. Private evaluation inputs stay outside
+the generated-code workspace; outputs are copied to a temporary evaluation
+directory. The local process runner is not a security sandbox: use a restricted
+container or VM when running untrusted generated code.
 
-The method graph is stored as readable JSON. Conclusions are stored as JSONL cards and linked in a separate `memory_graph.json`; that graph retrieves related conclusions and summarizes covered method families. SQLite indexes typed artifacts and run facts.
-
-Both graphs are directed. A parent outcome points to its child outcome with a
-`lineage`/`follows` edge; a prior method points to a newer comparable method
-with a sparse `same_family` or `shared_factor` evidence edge. A candidate or
-outcome may also declare several measured versions that informed its decision;
-each becomes an `informed_by` edge and is kept separate from the code-parent
-lineage. Semantic links are capped to the strongest neighbours instead of
-forming a family clique.
-Every exported edge carries its relation, reason, direction, target iteration,
-change logic, changed factors, and method components. Memory retrieval follows
-incoming ancestors first and then outgoing descendants, and includes that edge
-trace in the Agent context. A proposal may set `parent_variant_id` to an
-existing ancestor outcome to deliberately backtrack and branch from that
-version while retaining the inferior branch as evidence.
-
-Candidate estimates begin with the LLM's expected gain, information value, runtime, and failure risk. Once related paths have measured outcomes, GraphEvolve blends those observations back into the estimates before ranking the next branch. Evaluators may also declare auxiliary metrics and minimum metric constraints; a candidate that misses a declared constraint cannot be adopted on the primary score alone.
-
-Every applied patch passes two gates before a full run: deterministic workspace
-checks (edit scope, Python syntax, imports, and task interfaces) and an
-implementation review that reads the actual diff. The review returns pass,
-repair, or replan. A source-level mistake sends concrete feedback to Recovery
-and Coding, which keep repairing the same candidate until it works, the
-Recovery Agent diagnoses technical impossibility, or the shared budget or
-large technical-step safety cap is reached. If the candidate's own invariants
-or method description are contradictory or require information unavailable
-to solution code, replan sends the same research question back to Method
-Graph selection with specific candidate adjustments. The rejected proposal
-and revision edge remain visible; an exact repeat is ineligible, so it cannot
-start another identical repair cycle. A separate configurable consecutive
-replan cap stops a sequence of differently worded infeasible contracts; it
-does not limit ordinary code repair. Neither repair nor replan consumes a
-research round. Metric assessment remains separate; a patch can satisfy its
-stated invariants and still score poorly in the independent evaluator. If that
-evaluator has already produced a valid score and a later assessment-agent
-call fails, the controller records the measured fact and preserves the best
-valid version without inventing a causal conclusion.
-
-Agent prompts use a bounded context pack rather than serializing the complete
-artifact database. Graph rows retain IDs, directed parent/edge meaning, method
-family, changed factors, metrics, and short evidence; candidate rows retain
-their original indices; source excerpts are capped per file. The default pack
-limit is 80,000 characters. If a repair applies a byte-identical diff already
-seen in the same candidate, GraphEvolve records a structured no-progress
-failure and skips a duplicate semantic-review call so Recovery and Coding can
-choose a different local edit.
-
-### Dynamic method pool
-
-The method pool starts empty for a new project. The task contract provides data,
-interfaces, metric, permitted dependencies, and resource limits; it does not
-provide a predictor or a fixed candidate list. The Method Graph Agent may add
-any number of distinct nodes and may stop discovery when the current question
-has enough relevant alternatives.
-
-Each node stores its implementation description, changed factors, parent
-relations, measured results, conditions, cost, and failure history. Duplicate
-method descriptions are attached to the existing node instead of creating a
-new branch. The path priority uses the declared experiment value and measured
-runtime/risk; there is no hidden breadth/depth phase switch. One selected
-experiment still runs at a time, and unselected nodes remain in the project
-method pool.
-
-## Editing and safety
-
-MethodTrail uses structured edits instead of giving the LLM unrestricted shell access.
-
-- A new file can be created from complete content.
-- Existing files are changed through an exact old-text replacement or a
-  top-level symbol replacement. A complete rewrite is allowed only for the
-  declared solution entrypoint and is validated before it is written.
-- The old fragment must occur exactly once. Missing or ambiguous matches are rejected before files change.
-- Staged edits are parsed before commit; duplicate top-level definitions and
-  duplicate entry guards are rejected. Repair context includes the full
-  editable source when it fits the context limit.
-- Editable paths, protected paths, and declared data paths restrict where edits may go.
-- Every candidate uses its own Git worktree. Failed candidates never overwrite the accepted version.
-
-Technical failures are written to `memory/bugs.jsonl`. They remain available to
-the repair loop and failure-risk estimates, while only a completed model run
-with a measured metric can create an experiment-memory card or consume one
-research-round slot.
-
-Private evaluation files are kept outside the generated-code workspace. Candidate code finishes first; then required outputs are copied into a temporary evaluator directory. For hostile code, run MethodTrail inside a container or VM with restricted filesystem and network access.
+Running programs are checked periodically rather than killed after an implicit
+five-minute timeout. An execution monitor can request termination; the shared
+research deadline and an explicitly configured hard timeout remain enforceable.
 
 ## Install
 
-Python 3.11 or newer is required.
+Python 3.11+ and Git are required.
 
-    git clone <your-repository-url>
-    cd methodtrail
-    conda create -n methodtrail python=3.11 -y
-    conda run -n methodtrail python -m pip install -e ".[dev]"
+```powershell
+git clone https://github.com/CKTtari/GraphEvolve.git
+cd GraphEvolve
+python -m pip install -e ".[dev,benchmark]"
+python -m graphevolve --version
+```
 
-Install task-specific packages in the same environment when needed.
+An existing Conda environment can be used:
 
-## Configure an LLM API
+```powershell
+conda run -n nlphw python -m pip install -e ".[dev,benchmark]"
+conda run -n nlphw pytest
+```
 
-MethodTrail uses the OpenAI Python SDK with an OpenAI-compatible Chat Completions endpoint. Keep the key in an environment variable. MethodTrail does not write it into project metadata, candidate worktrees, or trajectories.
+## Run a task
 
-    $env:LLM_API_KEY = "your-key"
+Set your API key in an environment variable. Model and endpoint are launch-time
+settings for an OpenAI-compatible API; credentials are not saved in project
+metadata or trajectories.
 
-Pass the variable name, model, and endpoint when starting a run:
+```powershell
+$env:LLM_API_KEY = "your-key"
+python -m graphevolve run --contract .\task_contract.json --project-root .\graphevolve_state --project-id example --model your-model --api-key-env LLM_API_KEY --base-url https://your-endpoint/v1 --remaining-seconds 18000 --max-iterations 20
+```
 
-    conda run -n methodtrail python -m methodtrail run --contract .\task_contract.json --project-root .\methodtrail_state --project-id demo-project --model your-model-name --api-key-env LLM_API_KEY --base-url https://your-openai-compatible-endpoint/v1 --remaining-seconds 3600 --max-iterations 20
+The task contract declares `workspace_template`, allowed data and editable paths,
+execution commands, required outputs, metric name and direction. For an
+independent evaluator, also declare `private_evaluator_dir` and
+`private_evaluation_command`. See the [benchmark adapters](benchmarks/README.md)
+for complete contracts and preparation instructions.
 
-To start a fresh project while exposing measured results from a completed
-project as read-only evidence, add `--prior-project-id <completed-project>`.
-The prior project's code, graph edges, and variant IDs are not reused; the
-current project creates its own parent and evidence links.
+Resume with the same `--project-id` and `--session-id`. To expose a completed
+project's cards as read-only reference, add `--prior-project-id`; its code and
+graph nodes are not copied into the new project.
 
-The CLI default is `DASHSCOPE_API_KEY` for backward compatibility; the
-benchmark and examples can use `LLM_API_KEY` explicitly. The endpoint and
-model are launch-time settings.
+```powershell
+python -m graphevolve dashboard --project-root .\graphevolve_state --project-id example --session-id SESSION_ID --output .\dashboard.html
+python -m graphevolve pause --project-root .\graphevolve_state --project-id example --session-id SESSION_ID
+python -m graphevolve rollback --project-root .\graphevolve_state --project-id example --variant-id VARIANT_ID
+```
 
-## Create a task
+## Dashboard
 
-A task starts with a JSON contract. It declares public input files, editable source paths, expected outputs, execution commands, and the metric. The task adapter does not need to supply a predictor or a hand-written model search space.
+The self-contained HTML dashboard shows both directed graphs, node and edge
+details, candidate comparisons and the score for each research round. Nodes
+can be dragged; the canvas supports pan and zoom. Colors are derived from
+method-metadata similarity and are recomputed for the visible graph.
 
-    {
-      "task_id": "toy-classification",
-      "description": "Train from train.csv and write predictions.csv for test.csv.",
-      "workspace_template": "./workspace",
-      "allowed_data_paths": ["train.csv", "test.csv"],
-      "editable_paths": ["solution.py", "src/*.py"],
-      "solution_entrypoint": "solution.py",
-      "run_command": ["python", "solution.py"],
-      "private_evaluator_dir": "./private_evaluator",
-      "private_evaluation_command": ["python", "evaluate.py"],
-      "metric_file": "metrics.json",
-      "required_outputs": ["predictions.csv"],
-      "metric_name": "accuracy",
-      "maximize_metric": true,
-      "timeout_seconds": 900,
-      "execution_check_interval_seconds": 300,
-      "execution_hard_timeout_seconds": null,
-      "max_repair_steps": 100,
-      "minimum_iterations": 3,
-      "allowed_dependencies": ["numpy", "pandas", "scikit-learn"],
-      "protected_paths": ["task_contract.json", "metrics.json"]
-    }
+Each session exports its dashboard immediately and updates it during research.
+The three MLE-bench runners start a localhost HTTP server and print its URL.
+Pass `--no-dashboard-server` to disable it or `--stop-dashboard-server` to stop
+it when research ends.
 
-The workspace template contains public inputs only. A private evaluator can contain hidden labels and evaluate.py; it is excluded from LLM context and candidate worktrees. It writes a metric file such as:
+## Layout and versions
 
-    {"accuracy": 0.84}
+```text
+src/graphevolve/       installable Python package
+tests/                core regression tests
+benchmarks/           task contracts, preparation, runners and independent evaluators
+  RESULTS.md          current lightweight local evaluation
+.graphevolve/         generated state beneath each chosen project root (not committed)
+no-use/               local archive of superseded files (not committed)
+```
 
-For a public task, use evaluation_command instead of the private-evaluator fields. Self-reported metrics are intended only for quick smoke tasks.
+`src/` separates the installable package from development files. One package
+under it is intentional; modules group the agents, graphs, execution and storage.
 
-`timeout_seconds` remains accepted for older task adapters but is no longer an implicit per-command kill switch. By default, a running experiment is checked every `execution_check_interval_seconds`; the execution monitor can request termination when logs or outputs show a real failure. Set `execution_hard_timeout_seconds` only when a task explicitly requires a single-run cap. The research session's total budget remains the outer deadline.
+The release number is defined once in `src/graphevolve/_version.py`. Package
+metadata uses `0.18`; the CLI, dashboard and documentation display `v0.18`.
 
-The controller does not require a fixed number of candidates per round. It
-keeps distinct executable choices, and a measured method is not rerun from
-the pending frontier unless the proposal declares a new protocol or an
-unresolved repeatability reason in `repeat_reason`.
+Older local `.methodtrail` stores are reopened in place when their project ID
+is requested. New projects use `.graphevolve`. Saved experiment IDs and paths
+are retained so previous results remain inspectable. Use `graphevolve` for
+Python imports and CLI commands; the earlier package name has been retired.
 
-## Run and manage projects
+## Results and design
 
-Use a project ID to isolate code history, memory, candidates, and the accepted-version pointer. Use a session ID to pause and later continue one research thread.
+The [current results](benchmarks/RESULTS.md) cover three selected MLE-bench Lite
+tasks with the same LLM backbone. They are a lightweight local comparison,
+with documented differences in run length and prior evidence, rather than
+an official leaderboard result.
 
-    # Start a project
-    conda run -n methodtrail python -m methodtrail run --contract .\task_contract.json --project-root .\methodtrail_state --project-id feature-study --model your-model-name --api-key-env LLM_API_KEY --base-url https://your-openai-compatible-endpoint/v1 --remaining-seconds 3600 --max-iterations 20
-
-    # Pause a session
-    conda run -n methodtrail python -m methodtrail pause --project-root .\methodtrail_state --project-id feature-study --session-id <session-id>
-
-    # Resume it
-    conda run -n methodtrail python -m methodtrail run --contract .\task_contract.json --project-root .\methodtrail_state --project-id feature-study --session-id <session-id> --model your-model-name --api-key-env LLM_API_KEY --base-url https://your-openai-compatible-endpoint/v1 --remaining-seconds 1800 --max-iterations 20
-
-    # Roll back to an adopted candidate
-    conda run -n methodtrail python -m methodtrail rollback --project-root .\methodtrail_state --project-id feature-study --variant-id <adopted-variant-id>
-
-When a fixed iteration budget ends without an explicit adoption, select the best valid measured candidate from that session:
-
-    conda run -n methodtrail python -m methodtrail finalize --contract .\task_contract.json --project-root .\methodtrail_state --project-id feature-study --session-id <session-id>
-
-    # Open an offline monitor for one session (no API key is needed)
-    conda run -n methodtrail python -m methodtrail dashboard --project-root .\methodtrail_state --project-id feature-study --session-id <session-id> --output .\methodtrail_state\feature-study-dashboard.html
-
-## Project layout
-
-    .methodtrail/projects/<project-id>/
-    ├── repository/                  accepted source revisions
-    ├── sessions/<session-id>/        session state, handoff, JSONL trajectory
-    ├── candidates/<variant-id>.json  candidate status, parent, metric, branch
-    ├── wt/<short-id>/                isolated candidate worktrees
-    └── memory/                       experiment cards, method graph, memory graph, portfolio
-
-Git revisions, candidate metadata, session trajectories, and experiment-memory files are directly inspectable. The SQLite artifact store indexes decisions and run facts.
-
-The dashboard is a self-contained HTML file. It can switch between the method
-graph and the experiment-memory graph, filter measured nodes by research round,
-show directed and related-method edges, and display node or edge details. Nodes
-are coloured by method family and laid out by a deterministic force-style graph
-layout with family attraction and edge springs rather than a fixed ring. Each
-execution refreshes the JSONL trajectory and graph files; rerun the dashboard
-command to refresh the page. `benchmarks/mle_bench_lite_spooky/run_graph_evolve.py`
-starts a local HTTP server on `127.0.0.1:8767` by default and prints the live
-dashboard URL. The server remains available after the research process exits so
-the completed run can still be inspected; pass `--stop-dashboard-server` to
-stop it automatically or `--no-dashboard-server` to disable it.
-
-## Useful commands
-
-    conda run -n methodtrail python -m methodtrail repo-map .\workspace
-    conda run -n methodtrail pytest
-
-## Status
-
-MethodTrail is experimental. The core loop is intentionally compact while task adapters, executor isolation, and research roles continue to evolve.
+See [DESIGN.md](DESIGN.md) for the implemented architecture and
+[REFERENCES.md](REFERENCES.md) for source references.

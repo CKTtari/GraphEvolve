@@ -26,7 +26,7 @@ def main() -> None:
     if not np.isfinite(probabilities).all() or (probabilities < 0).any() or (probabilities > 1).any():
         raise ValueError("Insult predictions must be finite probabilities in [0, 1]")
     score = float(roc_auc_score(labels["Insult"].astype(int), probabilities))
-    output = Path(os.environ.get("METHODTRAIL_METRIC_FILE", "metrics.json"))
+    output = Path(os.environ.get("GRAPHEVOLVE_METRIC_FILE", os.environ.get("METHODTRAIL_METRIC_FILE", "metrics.json")))
     output.write_text(json.dumps({"roc_auc": score}, indent=2), encoding="utf-8")
     print(json.dumps({"roc_auc": score}))
 

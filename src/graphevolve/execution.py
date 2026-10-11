@@ -146,7 +146,11 @@ class Executor:
         respects only the shared research deadline or an explicit hard cap.
         """
         started = time.perf_counter()
-        environment = {**os.environ, "METHODTRAIL_METRIC_FILE": contract.metric_file}
+        environment = {
+            **os.environ,
+            "GRAPHEVOLVE_METRIC_FILE": contract.metric_file,
+            "METHODTRAIL_METRIC_FILE": contract.metric_file,  # Older independent evaluators.
+        }
         check_interval = contract.execution_check_interval_seconds
         hard_timeout = contract.execution_hard_timeout_seconds
         smoke_return_code: int | None = None
@@ -340,7 +344,7 @@ class Executor:
         )
         if not evaluation_command:
             return -1, False, "", "private evaluator requires private_evaluation_command", workspace / contract.metric_file
-        private_root = Path(tempfile.mkdtemp(prefix="methodtrail-private-eval-"))
+        private_root = Path(tempfile.mkdtemp(prefix="graphevolve-private-eval-"))
         try:
             shutil.copytree(private_source, private_root, dirs_exist_ok=True)
             for relative in contract.required_outputs:
@@ -350,6 +354,8 @@ class Executor:
                 shutil.copy2(source, target)
             private_environment = {
                 **environment,
+                "GRAPHEVOLVE_OUTPUT_DIR": str(private_root),
+                "GRAPHEVOLVE_METRIC_FILE": contract.metric_file,
                 "METHODTRAIL_OUTPUT_DIR": str(private_root),
                 "METHODTRAIL_METRIC_FILE": contract.metric_file,
             }
@@ -367,7 +373,7 @@ class Executor:
             # Copy only the metric back. Labels and private evaluator sources never
             # enter the candidate workspace.
             metric_source = private_root / contract.metric_file
-            metric_copy = workspace / ".methodtrail.private.metrics.json"
+            metric_copy = workspace / ".graphevolve.private.metrics.json"
             if metric_source.exists():
                 shutil.copy2(metric_source, metric_copy)
             if termination_reason and not stderr:
@@ -422,7 +428,7 @@ class Executor:
     ) -> tuple[int, bool, str, str, list[dict[str, Any]], str | None]:
         checkpoints: list[dict[str, Any]] = []
         command_started = time.monotonic()
-        with tempfile.TemporaryDirectory(prefix="methodtrail-exec-") as temp_dir:
+        with tempfile.TemporaryDirectory(prefix="graphevolve-exec-") as temp_dir:
             stdout_path = Path(temp_dir) / "stdout.log"
             stderr_path = Path(temp_dir) / "stderr.log"
             with stdout_path.open("w", encoding="utf-8") as stdout_file, stderr_path.open(

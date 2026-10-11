@@ -1,4 +1,4 @@
-"""Run MethodTrail itself on credit-g after an API key has been configured in the environment."""
+"""Run GraphEvolve itself on credit-g after an API key has been configured in the environment."""
 
 from __future__ import annotations
 
@@ -6,17 +6,19 @@ import argparse
 import json
 from pathlib import Path
 
-from methodtrail.llm import OpenAICompatibleLLM
-from methodtrail.orchestrator import MethodTrail
-from methodtrail.schemas import TaskContract
+from graphevolve import __version__
+from graphevolve.llm import OpenAICompatibleLLM
+from graphevolve.orchestrator import GraphEvolve
+from graphevolve.schemas import TaskContract
 
 
 def main() -> None:
     parser = argparse.ArgumentParser()
+    parser.add_argument("--version", action="version", version=f"GraphEvolve v{__version__}")
     parser.add_argument("--task", default="task")
-    parser.add_argument("--state-dir", default="methodtrail_state")
+    parser.add_argument("--state-dir", default="graphevolve_state")
     parser.add_argument("--model", required=True)
-    parser.add_argument("--api-key-env", default="DASHSCOPE_API_KEY")
+    parser.add_argument("--api-key-env", default="LLM_API_KEY")
     parser.add_argument("--base-url", default=None)
     parser.add_argument("--budget-seconds", type=int, default=1800)
     parser.add_argument("--max-iterations", type=int, default=8)
@@ -28,7 +30,7 @@ def main() -> None:
     payload["workspace_template"] = str(Path(args.task).resolve())
     contract = TaskContract.model_validate(payload)
     llm = OpenAICompatibleLLM(args.model, args.api_key_env, args.base_url)
-    trail = MethodTrail(
+    trail = GraphEvolve(
         args.state_dir,
         llm,
         session_id=args.session_id,

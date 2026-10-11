@@ -21,14 +21,14 @@ from .schemas import (
     TaskContract,
 )
 
-SYSTEM = """You are one role in MethodTrail, an autonomous experiment system.
+SYSTEM = """You are one role in GraphEvolve, an autonomous experiment system.
 Use only facts in the supplied context. Return one JSON object matching the requested schema.
 Do not claim a run happened unless it is present in the context. Keep code changes within the task contract."""
 
 
 # LLM context is a working set, not a database dump.  The state object still
 # keeps the complete graph and artifact history on disk, but prompts receive a
-# bounded, role-neutral summary. Saved v6 prompts exceeded 200k characters.
+# bounded, role-neutral summary. Older prompts exceeded 200k characters.
 # Packing must retain graph identity and structured experimental evidence
 # while dropping large payloads rather than removing decision information.
 _DEFAULT_CONTEXT_LIMIT = 80_000

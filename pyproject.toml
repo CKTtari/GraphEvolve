@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "graphevolve"
-version = "0.1.0"
+dynamic = ["version"]
 description = "Graph-guided autonomous experiment system with a coding agent"
 requires-python = ">=3.11"
 dependencies = [
@@ -18,14 +18,16 @@ dev = ["pytest>=8.0", "ruff>=0.6"]
 benchmark = ["pandas>=2.0", "scikit-learn>=1.4", "scipy>=1.11"]
 
 [project.scripts]
-methodtrail = "methodtrail.cli:main"
-graphevolve = "methodtrail.cli:main"
+graphevolve = "graphevolve.cli:main"
 
 [tool.setuptools]
 package-dir = {"" = "src"}
 
 [tool.setuptools.packages.find]
 where = ["src"]
+
+[tool.setuptools.dynamic]
+version = {attr = "graphevolve._version.__version__"}
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

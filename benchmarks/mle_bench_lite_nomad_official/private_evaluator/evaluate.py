@@ -31,7 +31,7 @@ def main() -> None:
             [root_mean_squared_log_error(truth[:, index], values[:, index]) for index in range(2)]
         )
     )
-    output = Path(os.environ.get("METHODTRAIL_METRIC_FILE", "metrics.json"))
+    output = Path(os.environ.get("GRAPHEVOLVE_METRIC_FILE", os.environ.get("METHODTRAIL_METRIC_FILE", "metrics.json")))
     output.write_text(
         json.dumps({"mean_columnwise_rmsle": score}, indent=2), encoding="utf-8"
     )

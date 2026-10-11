@@ -7,7 +7,17 @@ It omits the crystal geometry files, so this is a lightweight CSV-only local
 evaluation of the task. The independent evaluator computes mean-column-wise
 RMSLE.
 
-The fixed no-agent comparator is `baseline_solution.py`: a log-target
-random-forest multi-output model. GraphEvolve receives only the task contract
-and the public CSV files. Earlier experiments under `mle_bench_lite_nomad/`
-used the original Kaggle 2,400/600 split and are not mixed with this project.
+GraphEvolve receives only the task contract and public CSV files and writes its
+own solution. No fixed predictor is included.
+
+Run from this directory after installing the repository:
+
+```powershell
+python prepare_from_public.py
+python run_graph_evolve.py --model your-model --api-key-env LLM_API_KEY --base-url https://your-endpoint/v1 --budget-seconds 18000 --max-iterations 20 --project-id nomad-trial --state-dir runs/graphevolve_state --dashboard-port 8769
+```
+
+Prepared data and private labels are excluded from Git. The runner prints the
+dashboard URL and accepts `--session-id` to resume. `mlevolve_description.md`
+describes the corresponding baseline interface, with the same CSV-only scope.
+See [current results](../RESULTS.md) for measured scores and comparison conditions.

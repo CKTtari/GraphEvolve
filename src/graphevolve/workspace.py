@@ -154,7 +154,7 @@ class WorkspaceManager:
                 )
             )
         diff = "".join(diffs)
-        (workspace / ".methodtrail.diff").write_text(diff, encoding="utf-8")
+        (workspace / ".graphevolve.diff").write_text(diff, encoding="utf-8")
         return diff
 
     @staticmethod

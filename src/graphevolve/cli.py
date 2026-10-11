@@ -1,4 +1,4 @@
-"""Command-line entry points for inspection and one serial MethodTrail iteration."""
+"""Command-line entry points for inspection and one serial GraphEvolve iteration."""
 
 from __future__ import annotations
 
@@ -6,9 +6,10 @@ import argparse
 import json
 from pathlib import Path
 
+from ._version import __version__
 from .llm import OpenAICompatibleLLM
-from .orchestrator import MethodTrail
-from .project import ProjectManager
+from .orchestrator import GraphEvolve
+from .project import ProjectManager, resolve_state_root
 from .repository import RepoMap
 from .schemas import TaskContract
 
@@ -30,7 +31,8 @@ def _load_contract(path: str) -> TaskContract:
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(prog="methodtrail")
+    parser = argparse.ArgumentParser(prog="graphevolve")
+    parser.add_argument("--version", action="version", version=f"%(prog)s v{__version__}")
     commands = parser.add_subparsers(dest="command", required=True)
 
     show_map = commands.add_parser(
@@ -41,10 +43,10 @@ def main() -> None:
     run = commands.add_parser("run", help="run one autonomous experiment iteration")
     run.add_argument("--contract", required=True, help="task contract JSON")
     run.add_argument(
-        "--project-root", required=True, help="directory for MethodTrail state"
+        "--project-root", required=True, help="directory for GraphEvolve state"
     )
     run.add_argument("--model", required=True)
-    run.add_argument("--api-key-env", default="DASHSCOPE_API_KEY")
+    run.add_argument("--api-key-env", default="LLM_API_KEY")
     run.add_argument("--base-url", default=None)
     run.add_argument(
         "--llm-log",
@@ -107,7 +109,7 @@ def main() -> None:
     export.add_argument(
         "--model", required=True, help="used only to construct the client"
     )
-    export.add_argument("--api-key-env", default="DASHSCOPE_API_KEY")
+    export.add_argument("--api-key-env", default="LLM_API_KEY")
     export.add_argument("--base-url", default=None)
 
     dashboard = commands.add_parser(
@@ -124,7 +126,7 @@ def main() -> None:
         return
 
     if args.command == "pause":
-        manager = ProjectManager(Path(args.project_root).resolve() / ".methodtrail")
+        manager = ProjectManager(resolve_state_root(args.project_root, args.project_id))
         project = manager.load_project(args.project_id)
         session = manager.load_session(project, args.session_id)
         manager.update_session(project, session, status="paused")
@@ -132,7 +134,7 @@ def main() -> None:
         return
 
     if args.command == "rollback":
-        manager = ProjectManager(Path(args.project_root).resolve() / ".methodtrail")
+        manager = ProjectManager(resolve_state_root(args.project_root, args.project_id))
         project = manager.load_project(args.project_id)
         project = manager.set_incumbent(project, args.variant_id)
         print(
@@ -148,7 +150,7 @@ def main() -> None:
 
     if args.command == "finalize":
         contract = _load_contract(args.contract)
-        trail = MethodTrail(
+        trail = GraphEvolve(
             args.project_root,
             llm=None,  # type: ignore[arg-type]  # This command performs no LLM call.
             session_id=args.session_id,
@@ -169,7 +171,7 @@ def main() -> None:
         return
 
     if args.command == "dashboard":
-        trail = MethodTrail(
+        trail = GraphEvolve(
             args.project_root,
             llm=None,  # type: ignore[arg-type]  # dashboard export performs no LLM call.
             project_id=args.project_id,
@@ -190,7 +192,7 @@ def main() -> None:
         base_url=args.base_url,
         log_path=getattr(args, "llm_log", None),
     )
-    trail = MethodTrail(
+    trail = GraphEvolve(
         args.project_root,
         llm,
         session_id=getattr(args, "session_id", None),

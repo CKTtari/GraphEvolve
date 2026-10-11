@@ -8,13 +8,16 @@ import subprocess
 import sys
 from pathlib import Path
 
-from methodtrail.llm import OpenAICompatibleLLM
-from methodtrail.orchestrator import MethodTrail
-from methodtrail.schemas import TaskContract
+from graphevolve import __version__
+from graphevolve.llm import OpenAICompatibleLLM
+from graphevolve.orchestrator import GraphEvolve
+from graphevolve.project import resolve_state_root
+from graphevolve.schemas import TaskContract
 
 
 def main() -> None:
     parser = argparse.ArgumentParser()
+    parser.add_argument("--version", action="version", version=f"GraphEvolve v{__version__}")
     parser.add_argument("--model", default="gpt-6-luna")
     parser.add_argument("--api-key-env", default="LLM_API_KEY")
     parser.add_argument("--base-url", default="https://yuzapi.fun/v1")
@@ -63,13 +66,11 @@ def main() -> None:
     elif args.max_repair_attempts is not None:
         payload["max_repair_steps"] = args.max_repair_attempts
     contract = TaskContract.model_validate(payload)
-    llm_log = args.llm_log or str(
-        (Path(args.state_dir) / ".methodtrail" / "llm_calls.jsonl").resolve()
-    )
+    llm_log = args.llm_log or str(resolve_state_root(args.state_dir, args.project_id) / "llm_calls.jsonl")
     llm = OpenAICompatibleLLM(
         args.model, args.api_key_env, args.base_url, log_path=llm_log
     )
-    trail = MethodTrail(
+    trail = GraphEvolve(
         args.state_dir,
         llm,
         session_id=args.session_id,
@@ -95,10 +96,9 @@ def main() -> None:
         # Create the session before the long loop so the monitor URL is known
         # immediately and the first dashboard export has a stable location.
         trail._ensure_project_session(contract)
+        assert trail.project is not None
         dashboard_rel = (
-            Path(".methodtrail")
-            / "projects"
-            / args.project_id
+            trail.projects.project_path(trail.project).relative_to(dashboard_root)
             / "sessions"
             / str(trail.session_id)
             / "dashboard.html"

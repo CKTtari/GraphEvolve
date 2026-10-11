@@ -8,25 +8,25 @@ from types import SimpleNamespace
 
 import pytest
 
-from methodtrail.agents import SourceContextTooLarge, _context
-from methodtrail.artifacts import ArtifactStore
-from methodtrail.execution import Executor, Verifier
-from methodtrail.llm import (
+from graphevolve.agents import SourceContextTooLarge, _context
+from graphevolve.artifacts import ArtifactStore
+from graphevolve.execution import Executor, Verifier
+from graphevolve.llm import (
     LLMDeadlineExceeded,
     LLMOutputValidationError,
     LLMRequestTimeout,
     OpenAICompatibleLLM,
 )
-from methodtrail.memory import BugMemory, ExperimentMemory, MemoryCard
-from methodtrail.orchestrator import (
-    MethodTrail,
+from graphevolve.memory import BugMemory, ExperimentMemory, MemoryCard
+from graphevolve.orchestrator import (
+    GraphEvolve,
     _candidate_contract_issues,
     _metric_deteriorated,
 )
-from methodtrail.path_graph import ExperimentPathGraph, candidate_coverage_gap
-from methodtrail.project import ProjectManager
-from methodtrail.repository import RepoMap
-from methodtrail.schemas import (
+from graphevolve.path_graph import ExperimentPathGraph, candidate_coverage_gap
+from graphevolve.project import ProjectManager
+from graphevolve.repository import RepoMap
+from graphevolve.schemas import (
     AssessmentArtifact,
     CandidatePath,
     CandidateProposalArtifact,
@@ -43,7 +43,7 @@ from methodtrail.schemas import (
     TaskContract,
     ValueWeights,
 )
-from methodtrail.workspace import WorkspaceManager
+from graphevolve.workspace import WorkspaceManager
 
 
 def test_agent_context_is_bounded_but_keeps_directed_graph_identity() -> None:
@@ -162,7 +162,12 @@ def test_repo_map_reads_workspace_under_parent_runs_directory(tmp_path: Path) ->
     (workspace / "solution.py").write_text(
         "def predict():\n    return 1\n", encoding="utf-8"
     )
+    for folder in ("no-use", ".graphevolve", ".methodtrail"):
+        archived = workspace / folder
+        archived.mkdir()
+        (archived / "obsolete_solution.py").write_text("def predict(): return 0\n", encoding="utf-8")
     repo = RepoMap(workspace)
+    assert [file.path for file in repo.files] == ["solution.py"]
     context = repo.retrieve("repair solution", full_paths={"solution.py"})
     assert context and context[0]["path"] == "solution.py"
     assert "def predict" in context[0]["content"]
@@ -293,7 +298,7 @@ def test_deterioration_is_strict_and_direction_aware() -> None:
 
 
 def test_numeric_tie_does_not_replace_incumbent(tmp_path: Path) -> None:
-    trail = MethodTrail(tmp_path, FakeLLM())
+    trail = GraphEvolve(tmp_path, FakeLLM())
     trail.project = SimpleNamespace(incumbent_metric=0.35683099178266087)
     contract = TaskContract(
         task_id="tie", description="toy", workspace_template=str(tmp_path),
@@ -304,7 +309,8 @@ def test_numeric_tie_does_not_replace_incumbent(tmp_path: Path) -> None:
     assert trail._metric_improves_incumbent(contract, 0.35)
 
 
-def test_prior_project_cards_are_read_only_context(tmp_path: Path) -> None:
+@pytest.mark.parametrize("legacy_prior", [False, True])
+def test_prior_project_cards_are_read_only_context(tmp_path: Path, legacy_prior: bool) -> None:
     template = tmp_path / "template"
     template.mkdir()
     contract = TaskContract(
@@ -317,9 +323,10 @@ def test_prior_project_cards_are_read_only_context(tmp_path: Path) -> None:
         maximize_metric=False,
     )
     state_root = tmp_path / "state"
-    manager = ProjectManager(state_root / ".methodtrail")
+    manager = ProjectManager(state_root / (".methodtrail" if legacy_prior else ".graphevolve"))
     prior = manager.ensure_project(contract, "prior")
-    manager.ensure_project(contract, "current")
+    current_manager = ProjectManager(state_root / ".graphevolve")
+    current_manager.ensure_project(contract, "current")
     memory_dir = manager.project_path(prior) / "memory"
     memory_dir.mkdir(parents=True, exist_ok=True)
     cards = [
@@ -349,18 +356,18 @@ def test_prior_project_cards_are_read_only_context(tmp_path: Path) -> None:
     (memory_dir / "cards.jsonl").write_text(
         "".join(card.model_dump_json() + "\n" for card in cards), encoding="utf-8"
     )
-    trail = MethodTrail(
+    trail = GraphEvolve(
         state_root,
         FakeLLM(),
         project_id="current",
         prior_project_id="prior",
     )
-    trail.project = manager.load_project("current")
+    trail.project = current_manager.load_project("current")
     context = trail._prior_evidence_context(contract)
     assert [row["variant_id"] for row in context] == ["old-b", "old-a"]
     assert all(row["read_only"] for row in context)
     assert all(row["source_project_id"] == "prior" for row in context)
-    assert not (manager.project_path(manager.load_project("current")) / "memory" / "cards.jsonl").exists()
+    assert not (current_manager.project_path(current_manager.load_project("current")) / "memory" / "cards.jsonl").exists()
 
 
 def test_initial_candidate_coverage_requires_a_distinct_direction() -> None:
@@ -461,7 +468,7 @@ def test_search_policy_changes_value_weights() -> None:
 
 
 def test_portfolio_respects_minimization_metric(tmp_path: Path) -> None:
-    from methodtrail.portfolio import PortfolioManager, VariantProfile
+    from graphevolve.portfolio import PortfolioManager, VariantProfile
 
     portfolio = PortfolioManager(tmp_path / "portfolio.json")
     low = VariantProfile(
@@ -1568,7 +1575,7 @@ def test_preflight_repair_does_not_consume_research_round(tmp_path: Path) -> Non
         protected_paths=["evaluate.py", "metrics.json"],
     )
     llm = PreflightRepairingFakeLLM()
-    trail = MethodTrail(tmp_path / "project", llm)
+    trail = GraphEvolve(tmp_path / "project", llm)
     results = trail.run_research(contract, total_seconds=120, max_iterations=1)
     assert len(results) == 1
     assert results[0].completed_research
@@ -1603,7 +1610,7 @@ def test_semantic_review_retries_until_recovery_succeeds(tmp_path: Path) -> None
         protected_paths=["evaluate.py", "metrics.json"],
     )
     llm = SemanticRetryFakeLLM()
-    trail = MethodTrail(tmp_path / "project", llm)
+    trail = GraphEvolve(tmp_path / "project", llm)
     result = trail.run_iteration(contract, remaining_seconds=120)
     assert result.completed_research
     assert result.run is not None and result.run.metric == 0.8
@@ -1632,7 +1639,7 @@ def test_review_replans_unsatisfiable_candidate_without_repair_loop(tmp_path: Pa
         timeout_seconds=30,
         protected_paths=["evaluate.py", "metrics.json"],
     )
-    result = MethodTrail(tmp_path / "project", ReplanReviewFakeLLM()).run_iteration(
+    result = GraphEvolve(tmp_path / "project", ReplanReviewFakeLLM()).run_iteration(
         contract, remaining_seconds=120
     )
     assert not result.completed_research
@@ -1662,7 +1669,7 @@ def test_replanned_candidate_runs_in_same_research_round(tmp_path: Path) -> None
         protected_paths=["evaluate.py", "metrics.json"],
     )
     llm = ReplanThenPassFakeLLM()
-    trail = MethodTrail(tmp_path / "project", llm)
+    trail = GraphEvolve(tmp_path / "project", llm)
     results = trail.run_research(contract, total_seconds=120, max_iterations=1)
     assert len(results) == 2
     assert [result.completed_research for result in results] == [False, True]
@@ -1706,7 +1713,7 @@ def test_resumed_session_keeps_round_limit_and_replan_feedback(tmp_path: Path) -
     )
     llm = ReplanThenPassFakeLLM()
     root = tmp_path / "project"
-    initial = MethodTrail(root, llm, project_id="resumed-replan-toy")
+    initial = GraphEvolve(root, llm, project_id="resumed-replan-toy")
     first = initial.run_iteration(contract, remaining_seconds=120)
     assert first.resume_mode == "replan"
     assert initial.session is not None
@@ -1717,7 +1724,7 @@ def test_resumed_session_keeps_round_limit_and_replan_feedback(tmp_path: Path) -
         initial.project, session_id, "research_state", {"iteration": 1}
     )
 
-    resumed = MethodTrail(
+    resumed = GraphEvolve(
         root, llm, session_id=session_id, project_id="resumed-replan-toy"
     )
     results = resumed.run_research(contract, total_seconds=120, max_iterations=1)
@@ -1726,7 +1733,7 @@ def test_resumed_session_keeps_round_limit_and_replan_feedback(tmp_path: Path) -
     assert results[0].iteration == 1
     assert llm.proposal_calls == llm.review_calls == 2
 
-    already_complete = MethodTrail(
+    already_complete = GraphEvolve(
         root, llm, session_id=session_id, project_id="resumed-replan-toy"
     )
     assert already_complete.run_research(
@@ -1747,7 +1754,7 @@ def test_repeated_unsatisfiable_candidate_stops_without_loop(tmp_path: Path) -> 
         metric_name="score",
         required_outputs=["predictions.csv"],
     )
-    trail = MethodTrail(tmp_path / "project", ReplanReviewFakeLLM())
+    trail = GraphEvolve(tmp_path / "project", ReplanReviewFakeLLM())
     results = trail.run_research(contract, total_seconds=120, max_iterations=1)
     assert len(results) == 1
     assert not results[0].completed_research
@@ -1776,7 +1783,7 @@ def test_distinct_unsatisfiable_replans_hit_separate_safety_cap(tmp_path: Path) 
         max_repair_steps=100,
     )
     llm = ChurningReplanFakeLLM()
-    trail = MethodTrail(tmp_path / "project", llm)
+    trail = GraphEvolve(tmp_path / "project", llm)
     results = trail.run_research(contract, total_seconds=120, max_iterations=1)
     assert len(results) == llm.proposal_calls == 3
     assert all(result.resume_mode == "replan" for result in results)
@@ -1808,7 +1815,7 @@ def test_valid_metric_survives_assessment_provider_failure(tmp_path: Path) -> No
         required_outputs=["predictions.csv"],
         protected_paths=["evaluate.py", "metrics.json"],
     )
-    trail = MethodTrail(tmp_path / "project", AssessmentFailureFakeLLM())
+    trail = GraphEvolve(tmp_path / "project", AssessmentFailureFakeLLM())
     try:
         trail.run_iteration(contract, remaining_seconds=120)
     except RuntimeError as error:
@@ -1849,7 +1856,7 @@ def test_orchestrator_runs_a_full_adopted_iteration(tmp_path: Path) -> None:
         timeout_seconds=30,
         protected_paths=["evaluate.py", "metrics.json"],
     )
-    trail = MethodTrail(tmp_path / "project", FakeLLM())
+    trail = GraphEvolve(tmp_path / "project", FakeLLM())
     result = trail.run_iteration(contract, remaining_seconds=120)
     assert result.assessment is not None
     assert result.assessment.decision == "adopt"
@@ -1877,7 +1884,7 @@ def test_budget_deadline_stops_cleanly_after_valid_run(tmp_path: Path) -> None:
         timeout_seconds=30,
         protected_paths=["evaluate.py", "metrics.json"],
     )
-    trail = MethodTrail(tmp_path / "project", DeadlineDuringMemoryFakeLLM())
+    trail = GraphEvolve(tmp_path / "project", DeadlineDuringMemoryFakeLLM())
     results = trail.run_research(contract, total_seconds=120, max_iterations=20)
 
     assert results == []
@@ -1898,7 +1905,7 @@ def test_budget_deadline_stops_cleanly_after_valid_run(tmp_path: Path) -> None:
 
 
 def test_dashboard_shows_brand_score_series_and_candidate_comparison(tmp_path: Path) -> None:
-    from methodtrail.dashboard import write_dashboard
+    from graphevolve.dashboard import write_dashboard
 
     target = write_dashboard(
         tmp_path / "dashboard.html",
@@ -1946,7 +1953,7 @@ def test_dashboard_is_available_immediately_after_session_creation(tmp_path: Pat
         required_outputs=["predictions.csv"],
         protected_paths=[],
     )
-    trail = MethodTrail(tmp_path / "project", FakeLLM(), project_id="initial-dashboard")
+    trail = GraphEvolve(tmp_path / "project", FakeLLM(), project_id="initial-dashboard")
     trail._ensure_project_session(contract)
 
     assert trail.project is not None and trail.session is not None
@@ -1981,7 +1988,7 @@ def test_orchestrator_repairs_a_failed_generated_program(tmp_path: Path) -> None
         max_repair_attempts=1,
         protected_paths=["evaluate.py", "metrics.json"],
     )
-    trail = MethodTrail(tmp_path / "project", RepairingFakeLLM())
+    trail = GraphEvolve(tmp_path / "project", RepairingFakeLLM())
     result = trail.run_iteration(contract, remaining_seconds=120)
     assert result.assessment is not None and result.assessment.decision == "adopt"
     assert result.run is not None and result.run.metric == 0.8
@@ -2013,7 +2020,7 @@ def test_invalid_repair_response_recovers_without_reapplying_or_counting_a_round
         required_outputs=["predictions.csv"], protected_paths=["evaluate.py", "metrics.json"],
         timeout_seconds=30,
     )
-    trail = MethodTrail(tmp_path / "project", InvalidRepairLLM())
+    trail = GraphEvolve(tmp_path / "project", InvalidRepairLLM())
     results = trail.run_research(contract, total_seconds=120, max_iterations=1)
     assert len(results) == 1 and results[0].completed_research
     assert results[0].run.metric == 0.8
@@ -2041,7 +2048,7 @@ def test_unexpected_planning_error_marks_session_interrupted(tmp_path: Path) -> 
         allowed_data_paths=[], run_command=[sys.executable, "solution.py"], metric_name="score",
     )
     llm = BrokenPlanner()
-    trail = MethodTrail(tmp_path / "project", llm)
+    trail = GraphEvolve(tmp_path / "project", llm)
     with pytest.raises(RuntimeError, match="unexpected planning failure"):
         trail.run_research(contract, total_seconds=120, max_iterations=1)
     assert trail.session.status == "interrupted"

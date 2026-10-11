@@ -34,7 +34,13 @@ from .llm import (
 from .memory import BugMemory, BugRecord, ExperimentMemory, MemoryCard
 from .path_graph import ExperimentPathGraph, candidate_coverage_gap
 from .portfolio import PortfolioManager, VariantProfile
-from .project import CandidateRecord, ProjectManager, ProjectRecord, SessionRecord
+from .project import (
+    CandidateRecord,
+    ProjectManager,
+    ProjectRecord,
+    SessionRecord,
+    resolve_state_root,
+)
 from .repository import RepoMap
 from .schemas import (
     AssessmentArtifact,
@@ -206,7 +212,7 @@ def _candidate_contract_issues(
     return issues
 
 
-class MethodTrail:
+class GraphEvolve:
     """Runs one serial experiment at a time and writes every fact into artifacts."""
 
     def __init__(
@@ -218,7 +224,7 @@ class MethodTrail:
         prior_project_id: str | None = None,
     ) -> None:
         self.root = Path(project_root).resolve()
-        self.state_root = self.root / ".methodtrail"
+        self.state_root = resolve_state_root(self.root, project_id)
         self.state_root.mkdir(parents=True, exist_ok=True)
         self.store = ArtifactStore(self.state_root / "artifacts.sqlite")
         self.graph = ExperimentPathGraph(self.state_root / "experiment_graph.json")
@@ -263,12 +269,13 @@ class MethodTrail:
         if self.prior_project_id == self.project.project_id:
             return []
         try:
-            prior = self.projects.load_project(self.prior_project_id)
+            prior_manager = ProjectManager(resolve_state_root(self.root, self.prior_project_id))
+            prior = prior_manager.load_project(self.prior_project_id)
         except FileNotFoundError:
             return []
         if prior.task_id != contract.task_id:
             return []
-        cards_path = self.projects.project_path(prior) / "memory" / "cards.jsonl"
+        cards_path = prior_manager.project_path(prior) / "memory" / "cards.jsonl"
         if not cards_path.exists():
             return []
         cards: list[MemoryCard] = []
@@ -316,6 +323,13 @@ class MethodTrail:
 
     def _ensure_project_session(self, contract: TaskContract) -> None:
         if self.project is None:
+            state_root = resolve_state_root(self.root, self.project_id or contract.task_id)
+            if state_root != self.state_root:
+                # A caller may omit project_id until the task contract is known.
+                self.state_root = state_root
+                self.store = ArtifactStore(state_root / "artifacts.sqlite")
+                self.workspaces = WorkspaceManager(state_root / "runs")
+                self.projects = ProjectManager(state_root)
             self.project = self.projects.ensure_project(contract, self.project_id)
             if self.project.incumbent_metric is None and self.project.incumbent_variant_id:
                 incumbent = self.projects.get_candidate(
@@ -955,7 +969,7 @@ class MethodTrail:
                 self.project,
                 candidate,
                 candidate.source_files,
-                f"methodtrail: independently measured {change.title}",
+                f"graphevolve: independently measured {change.title}",
                 run.metric,
             )
         elif not already_adopted:
@@ -1647,7 +1661,7 @@ class MethodTrail:
             self.project,
             best,
             files,
-            "methodtrail: best valid candidate at research budget end",
+            "graphevolve: best valid candidate at research budget end",
             best.metric,
         )
         self.projects.append_event(
@@ -1852,7 +1866,7 @@ class MethodTrail:
                     self.project,
                     candidate,
                     candidate.source_files,
-                    f"methodtrail: {change.title}",
+                    f"graphevolve: {change.title}",
                     run.metric,
                 )
             else:

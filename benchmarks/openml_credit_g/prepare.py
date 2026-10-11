@@ -1,4 +1,4 @@
-"""Download OpenML credit-g and create a predictor-free MethodTrail task workspace."""
+"""Download OpenML credit-g and create a predictor-free GraphEvolve task workspace."""
 
 from __future__ import annotations
 

@@ -1,4 +1,7 @@
 # Runtime state and generated experiment workspaces
+.graphevolve/
+graphevolve_state/
+**/graphevolve_state*/
 .methodtrail/
 methodtrail_state/
 **/methodtrail_state*/
@@ -8,6 +11,7 @@ methodtrail_state/
 **/task_*/
 cache/
 no-use/
+benchmarks/openml_credit_g/task/
 benchmarks/mle_bench_lite_*/task/
 benchmarks/mle_bench_lite_*/raw/
 benchmarks/mle_bench_lite_*/raw*.csv
@@ -37,6 +41,7 @@ venv/
 !.env.example
 
 # OS/editor files
+TODO.md
 .DS_Store
 Thumbs.db
 .vscode/

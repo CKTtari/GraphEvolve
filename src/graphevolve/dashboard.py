@@ -1,4 +1,4 @@
-"""Offline HTML monitor for one MethodTrail project/session.
+"""Offline HTML monitor for one GraphEvolve project/session.
 
 The page deliberately has no CDN dependency.  It can be opened directly from
 the filesystem while a run is paused or after it finishes.
@@ -8,10 +8,10 @@ from __future__ import annotations
 
 import json
 from html import escape
-from importlib.metadata import PackageNotFoundError
-from importlib.metadata import version as distribution_version
 from pathlib import Path
 from typing import Any
+
+from ._version import __version__
 
 
 def write_dashboard(target: str | Path, payload: dict[str, Any]) -> Path:
@@ -19,10 +19,7 @@ def write_dashboard(target: str | Path, payload: dict[str, Any]) -> Path:
     target_path.parent.mkdir(parents=True, exist_ok=True)
     data = json.dumps(payload, ensure_ascii=False).replace("</", "<\\/")
     project_id = escape(str(payload.get("project", {}).get("project_id", "local")))
-    try:
-        release = distribution_version("graphevolve")
-    except PackageNotFoundError:
-        release = "0.1.0"
+    release = __version__
     brand = escape(f"GraphEvolve v{release}")
     document_title = escape(f"GraphEvolve v{release} · {project_id}")
     target_path.write_text(
@@ -139,7 +136,7 @@ let activePositions = null, activeGraphKey = '', activeTransform = null;
 let dragging = null, panDragging = null, suppressNextClick = false;
 let selectedNodeId = null, selectedEdgeKey = null;
 // Layout v2 deliberately ignores coordinates saved by the old fixed 1000×570 canvas.
-const positionStoragePrefix = `methodtrail-pos-v2|${String(DATA.project?.project_id || '')}|${String(DATA.session?.session_id || '')}`;
+const positionStoragePrefix = `graphevolve-pos-v2|${String(DATA.project?.project_id || '')}|${String(DATA.session?.session_id || '')}`;
 const method = DATA.method_graph || {nodes:[], edges:[]};
 const memory = DATA.memory_graph || {nodes:[], edges:[]};
 function label(n){ return String(n.title || n.conclusion || n.method_family || n.card_id || n.variant_id || n.node_id || '').slice(0,25); }

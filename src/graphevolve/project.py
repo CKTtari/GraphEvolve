@@ -19,6 +19,27 @@ from typing import Any
 from .schemas import TaskContract
 
 
+def resolve_state_root(project_root: str | Path, project_id: str | None = None) -> Path:
+    """Create new state under GraphEvolve while reopening older projects in place.
+
+    Keep saved paths, Git worktrees and provenance IDs intact. A requested
+    project takes precedence over the default directory when both exist.
+    """
+
+    root = Path(project_root).resolve()
+    current = root / ".graphevolve"
+    legacy = root / ".methodtrail"
+    if project_id:
+        if (current / "projects" / project_id / "project.json").is_file():
+            return current
+        if (legacy / "projects" / project_id / "project.json").is_file():
+            return legacy
+        return current
+    if current.exists() or not legacy.exists():
+        return current
+    return legacy
+
+
 def _now() -> str:
     return datetime.now(UTC).isoformat()
 
@@ -109,7 +130,8 @@ class ProjectManager:
                 target.unlink()
 
         ignore_lines = [
-            ".methodtrail.diff",
+            ".graphevolve.diff",
+            ".methodtrail.diff",  # Existing experiment repositories may retain this file.
             "predictions.csv",
             "metrics.json",
             "__pycache__/",
@@ -120,10 +142,10 @@ class ProjectManager:
             "\n".join(ignore_lines) + "\n", encoding="utf-8"
         )
         self._git(repository, "init")
-        self._git(repository, "config", "user.email", "methodtrail@local")
-        self._git(repository, "config", "user.name", "MethodTrail")
+        self._git(repository, "config", "user.email", "graphevolve@local")
+        self._git(repository, "config", "user.name", "GraphEvolve")
         self._git(repository, "add", "--all")
-        self._git(repository, "commit", "-m", "methodtrail: task baseline")
+        self._git(repository, "commit", "-m", "graphevolve: task baseline")
         baseline = self._git(repository, "rev-parse", "HEAD").strip()
         now = _now()
         record = ProjectRecord(
@@ -144,7 +166,7 @@ class ProjectManager:
     def load_project(self, project_id: str) -> ProjectRecord:
         path = self.projects_root / project_id / "project.json"
         if not path.exists():
-            raise FileNotFoundError(f"unknown MethodTrail project: {project_id}")
+            raise FileNotFoundError(f"unknown GraphEvolve project: {project_id}")
         return ProjectRecord(**json.loads(path.read_text(encoding="utf-8")))
 
     def load_session(self, project: ProjectRecord, session_id: str) -> SessionRecord:
@@ -196,7 +218,7 @@ class ProjectManager:
         parent = self.get_candidate(project, parent_variant_id) if parent_variant_id else None
         parent_commit = parent.commit if parent and parent.commit else project.incumbent_commit
         variant_id = uuid.uuid4().hex
-        branch = f"methodtrail/{session.session_id}/{variant_id[:10]}"
+        branch = f"graphevolve/{session.session_id}/{variant_id[:10]}"
         # Worktrees need a deliberately short on-disk path on Windows. The full
         # session and variant identifiers remain in candidate metadata.
         workspace = self._project_dir(project) / "wt" / variant_id[:12]

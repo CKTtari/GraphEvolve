@@ -29,7 +29,7 @@ def main() -> None:
         raise ValueError("each prediction row must sum to 1")
     true = labels[CLASSES].to_numpy(dtype=int).argmax(axis=1)
     score = float(log_loss(true, np.clip(values, 1e-15, 1.0), labels=list(range(3))))
-    output = Path(os.environ.get("METHODTRAIL_METRIC_FILE", "metrics.json"))
+    output = Path(os.environ.get("GRAPHEVOLVE_METRIC_FILE", os.environ.get("METHODTRAIL_METRIC_FILE", "metrics.json")))
     output.write_text(
         json.dumps({"multi_class_log_loss": score}, indent=2), encoding="utf-8"
     )

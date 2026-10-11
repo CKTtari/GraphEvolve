@@ -10,11 +10,14 @@ from pathlib import Path
 
 IGNORED_PARTS = {
     ".git",
+    ".graphevolve",
+    ".methodtrail",
     ".venv",
     "venv",
     "__pycache__",
     ".pytest_cache",
     "node_modules",
+    "no-use",
     "runs",
 }
 
@@ -36,7 +39,7 @@ class RepoMap:
         for path in self.root.rglob("*.py"):
             # Check only path components below the repository root.  Candidate
             # workspaces commonly live under a parent directory named ``runs``
-            # (for example ``.../.methodtrail/.../runs/.../wt/...``); looking at
+            # (for example ``.../.graphevolve/.../runs/.../wt/...``); looking at
             # ``path.parts`` would incorrectly discard the entire workspace and
             # leave Coding/Repair agents with an empty repository context.
             relative = path.relative_to(self.root)
